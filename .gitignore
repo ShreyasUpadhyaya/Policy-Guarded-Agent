@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Secrets
+.env
+
+# Local run output (not committed evaluation results)
+data/
+
+# Claude Code planning/tooling -- local only, never pushed
+.claude/
+CLAUDE.md
+PLAN.md
+CLAUDE_CODE_PROMPTS.md
