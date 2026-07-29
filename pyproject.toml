@@ -6,6 +6,8 @@ requires-python = ">=3.12,<3.14"
 license = "MIT"
 dependencies = [
     "tau2",
+    "pydantic>=2.5.0",
+    "pyyaml>=6.0.2",
 ]
 
 [dependency-groups]
@@ -13,6 +15,7 @@ dev = [
     "ruff>=0.8.0",
     "pytest>=8.3.0",
     "mypy>=1.13.0",
+    "types-PyYAML>=6.0.0",
 ]
 
 [tool.uv.sources]
@@ -37,5 +40,5 @@ testpaths = ["tests"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src"]
+files = ["src", "scripts"]
 strict = true

@@ -1,0 +1,17 @@
+domain: mock
+agent_llm: anthropic/claude-haiku-4-5-20251001
+user_llm: anthropic/claude-haiku-4-5-20251001
+temperature: 0.0
+num_trials: 1
+num_tasks: 2
+max_steps: 200
+max_errors: 10
+max_concurrency: 3
+retry_delay: 1.0
+max_retries: 4
+save_to: wrapper-smoke
+
+budget:
+  max_tool_calls: 20
+  max_tokens: 50000
+  max_wall_clock_seconds: 300
