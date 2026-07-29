@@ -1,4 +1,4 @@
-.PHONY: install check test lint typecheck smoke-mock smoke-guarded eval-full report
+.PHONY: install check test lint typecheck smoke-mock baseline-smoke smoke-guarded eval-full report
 
 install:
 	uv sync --group dev
@@ -19,6 +19,12 @@ typecheck:
 smoke-mock:
 	uv run --env-file .env tau2 check-data
 	uv run --env-file .env tau2 run --domain mock --agent-llm anthropic/claude-haiku-4-5-20251001 --user-llm anthropic/claude-haiku-4-5-20251001 --num-trials 1 --num-tasks 2 --save-to smoke-mock
+
+baseline-smoke:
+	uv run --env-file .env tau2 check-data
+	uv run --env-file .env tau2 run --domain retail --agent llm_agent --agent-llm anthropic/claude-haiku-4-5-20251001 --user-llm anthropic/claude-haiku-4-5-20251001 --num-trials 1 --num-tasks 5 --save-to baseline_smoke
+	mkdir -p evals/results/baseline_smoke
+	cp vendor/tau2-bench/data/simulations/baseline_smoke/results.json evals/results/baseline_smoke/results.json
 
 smoke-guarded:
 	@echo "not available until PLAN.md commit 11 (tau2 adapter)" && exit 1
