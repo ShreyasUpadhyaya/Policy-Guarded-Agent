@@ -15,6 +15,10 @@ build/
 # Local run output (not committed evaluation results)
 data/
 
+# Vendored tau2-bench checkout (source of TAU2_DATA_DIR) -- fetched by `make install`,
+# reproducible from the pinned tag in pyproject.toml, never edited (CLAUDE.md rule 5)
+vendor/
+
 # Claude Code planning/tooling -- local only, never pushed
 .claude/
 CLAUDE.md
