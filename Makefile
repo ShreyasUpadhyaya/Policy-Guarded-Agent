@@ -27,7 +27,8 @@ baseline-smoke:
 	cp vendor/tau2-bench/data/simulations/baseline_smoke/results.json evals/results/baseline_smoke/results.json
 
 smoke-guarded:
-	@echo "not available until PLAN.md commit 11 (tau2 adapter)" && exit 1
+	uv run --env-file .env tau2 check-data
+	uv run --env-file .env python scripts/run_tau2_guarded.py run --domain retail --agent guarded_agent --agent-llm anthropic/claude-haiku-4-5-20251001 --user-llm anthropic/claude-haiku-4-5-20251001 --num-trials 1 --num-tasks 5 --save-to smoke_guarded
 
 eval-full:
 	@echo "not available until PLAN.md commit 24 (FULL ablation run) -- ASK BEFORE RUNNING" && exit 1

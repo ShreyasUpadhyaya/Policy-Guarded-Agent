@@ -42,8 +42,40 @@ class ToolRegistry:
         tools = {t["name"]: ToolDefinition.model_validate(t) for t in raw["tools"]}
         return cls(tools)
 
+    @classmethod
+    def from_openai_schemas(
+        cls,
+        schemas: list[dict[str, Any]],
+        *,
+        mutating: bool = True,
+        risk_tier: Literal["low", "medium", "high"] = "high",
+    ) -> ToolRegistry:
+        """Build a registry from OpenAI-style function-calling schemas.
+
+        Used for domains (e.g. a tau2 benchmark run) whose real tools aren't
+        known ahead of time and so can't live in registry.yaml. `mutating`
+        and `risk_tier` default to the conservative case (True/"high") since
+        this format carries no read/write classification of its own --
+        fail-safe forcing, per CLAUDE.md, rather than assuming a tool is safe.
+        """
+        tools = {}
+        for schema in schemas:
+            function = schema["function"]
+            tools[function["name"]] = ToolDefinition(
+                name=function["name"],
+                description=function.get("description", ""),
+                mutating=mutating,
+                risk_tier=risk_tier,
+                parameters=function.get("parameters", {"type": "object", "properties": {}}),
+            )
+        return cls(tools)
+
     def get(self, name: str) -> ToolDefinition | None:
         return self._tools.get(name)
+
+    @property
+    def tools(self) -> dict[str, ToolDefinition]:
+        return dict(self._tools)
 
     def dispatch(
         self,

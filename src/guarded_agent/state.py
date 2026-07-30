@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 class ToolCall(BaseModel):
+    id: str = ""
     name: str
     arguments: dict[str, Any]
 
@@ -14,11 +15,14 @@ class Message(BaseModel):
     role: Literal["user", "assistant", "tool"]
     content: str | None = None
     tool_calls: list[ToolCall] | None = None
+    tool_call_id: str | None = None
+    """For role="tool": which proposed ToolCall.id this message answers."""
 
 
 class ProposedAction(BaseModel):
     """A tool call the agent wants to make, pending policy check / write gate."""
 
+    id: str = ""
     tool_name: str
     arguments: dict[str, Any]
 
