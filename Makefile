@@ -1,4 +1,4 @@
-.PHONY: install check test lint typecheck smoke-mock baseline-smoke smoke-guarded eval-full report
+.PHONY: install check test lint typecheck smoke-mock baseline-smoke smoke-guarded v1-smoke eval-full report
 
 install:
 	uv sync --group dev
@@ -29,6 +29,12 @@ baseline-smoke:
 smoke-guarded:
 	uv run --env-file .env tau2 check-data
 	uv run --env-file .env python scripts/run_tau2_guarded.py run --domain retail --agent guarded_agent --agent-llm anthropic/claude-haiku-4-5-20251001 --user-llm anthropic/claude-haiku-4-5-20251001 --num-trials 1 --num-tasks 5 --save-to smoke_guarded
+
+v1-smoke:
+	uv run --env-file .env tau2 check-data
+	uv run --env-file .env python scripts/run_tau2_guarded.py run --domain retail --agent guarded_agent --agent-llm anthropic/claude-haiku-4-5-20251001 --user-llm anthropic/claude-haiku-4-5-20251001 --num-trials 1 --num-tasks 5 --save-to v1_smoke
+	mkdir -p evals/results/v1_smoke
+	cp vendor/tau2-bench/data/simulations/v1_smoke/results.json evals/results/v1_smoke/results.json
 
 eval-full:
 	@echo "not available until PLAN.md commit 24 (FULL ablation run) -- ASK BEFORE RUNNING" && exit 1
