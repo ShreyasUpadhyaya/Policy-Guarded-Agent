@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from guarded_agent.config import BudgetConfig
 from guarded_agent.guardrails.budgets import check_budget
 from guarded_agent.state import AgentState, Message, ProposedAction, ToolCall
+from guarded_agent.telemetry.tracing import traced_node, traced_tool_call
 from guarded_agent.tools.registry import ToolDefinition, ToolRegistry
 
 DEFAULT_BUDGET_LIMITS = BudgetConfig(
@@ -111,7 +112,9 @@ def make_executor_node(registry: ToolRegistry) -> Callable[[AgentState], dict[st
         def placeholder_handler(arguments: dict[str, Any]) -> Any:
             return {"note": f"executed {action.tool_name} (placeholder)"}
 
-        result = registry.dispatch(action.tool_name, action.arguments, placeholder_handler)
+        with traced_tool_call(action.tool_name, action.arguments) as span:
+            result = registry.dispatch(action.tool_name, action.arguments, placeholder_handler)
+            span.set_attribute("guarded_agent.tool.ok", result.ok)
         content = (
             str(result.result)
             if result.ok
@@ -166,9 +169,9 @@ def build_graph(
     registry = registry or ToolRegistry.load()
 
     graph = StateGraph(AgentState)
-    graph.add_node("executor", make_executor_node(registry))  # type: ignore[call-overload]
-    graph.add_node("agent", make_agent_node(generate_fn, registry))  # type: ignore[call-overload]
-    graph.add_node("kill_switch", make_kill_switch_node(budget_limits))  # type: ignore[call-overload]
+    graph.add_node("executor", traced_node("executor", make_executor_node(registry)))  # type: ignore[call-overload]
+    graph.add_node("agent", traced_node("agent", make_agent_node(generate_fn, registry)))  # type: ignore[call-overload]
+    graph.add_node("kill_switch", traced_node("kill_switch", make_kill_switch_node(budget_limits)))  # type: ignore[call-overload]
     graph.add_conditional_edges(
         START,
         make_entry_router(budget_limits),
