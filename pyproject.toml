@@ -8,6 +8,7 @@ dependencies = [
     "tau2",
     "pydantic>=2.5.0",
     "pyyaml>=6.0.2",
+    "jsonschema>=4.20.0",
 ]
 
 [dependency-groups]
@@ -16,6 +17,7 @@ dev = [
     "pytest>=8.3.0",
     "mypy>=1.13.0",
     "types-PyYAML>=6.0.0",
+    "types-jsonschema>=4.20.0",
 ]
 
 [tool.uv.sources]

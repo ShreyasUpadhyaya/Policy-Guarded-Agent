@@ -1,0 +1,26 @@
+tools:
+  - name: get_order_details
+    description: Look up details for an existing order by order id.
+    mutating: false
+    risk_tier: low
+    parameters:
+      type: object
+      properties:
+        order_id:
+          type: string
+      required: [order_id]
+      additionalProperties: false
+
+  - name: issue_refund
+    description: Issue a refund to the customer for a given order.
+    mutating: true
+    risk_tier: high
+    parameters:
+      type: object
+      properties:
+        order_id:
+          type: string
+        amount:
+          type: number
+      required: [order_id, amount]
+      additionalProperties: false
