@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from guarded_agent.config import BudgetConfig
 from guarded_agent.graph import AgentDecision, GenerateFn, build_graph, router, run
-from guarded_agent.state import AgentState, Message, ProposedAction, ToolCall
+from guarded_agent.state import AgentState, BudgetCounters, Message, ProposedAction, ToolCall
 from guarded_agent.tools.registry import ToolDefinition
 
 MOCK_TASKS_PATH = (
@@ -105,6 +106,53 @@ def test_executor_path_records_unknown_tool_error_without_raising() -> None:
     tool_message = result.conversation[-2]
     assert tool_message.role == "tool"
     assert "No tool registered" in (tool_message.content or "")
+
+
+KILL_SWITCH_LIMITS = BudgetConfig(
+    max_steps=5, max_tool_calls=5, max_tokens=1000, max_wall_clock_seconds=60.0
+)
+
+
+def _never_call(conversation: list[Message], tools: list[ToolDefinition]) -> AgentDecision:
+    raise AssertionError("generate_fn should never be called once budget is breached")
+
+
+@pytest.mark.parametrize(
+    "breached_budget",
+    [
+        BudgetCounters(steps_used=5),
+        BudgetCounters(tool_calls_used=5),
+        BudgetCounters(tokens_used=1000),
+        BudgetCounters(elapsed_seconds=60.0),
+    ],
+)
+def test_kill_switch_triggers_on_each_cap_without_calling_generate_fn(
+    breached_budget: BudgetCounters,
+) -> None:
+    app = build_graph(_never_call, budget_limits=KILL_SWITCH_LIMITS)
+    state = AgentState(
+        conversation=[Message(role="user", content="hi")],
+        budget=breached_budget,
+    )
+
+    result = run(app, state)
+
+    assert result.escalated is True
+    assert result.escalation_reason is not None
+    assert result.conversation[-1].role == "assistant"
+
+
+def test_kill_switch_takes_priority_over_a_pending_proposed_action() -> None:
+    app = build_graph(_never_call, budget_limits=KILL_SWITCH_LIMITS)
+    state = AgentState(
+        conversation=[Message(role="user", content="hi")],
+        proposed_action=ProposedAction(tool_name="get_order_details", arguments={"order_id": "1"}),
+        budget=BudgetCounters(steps_used=5),
+    )
+
+    result = run(app, state)
+
+    assert result.escalated is True
 
 
 @pytest.mark.skipif(

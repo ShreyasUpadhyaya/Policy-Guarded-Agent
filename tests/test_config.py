@@ -22,6 +22,7 @@ max_retries: 4
 save_to: wrapper-smoke
 
 budget:
+  max_steps: 20
   max_tool_calls: 20
   max_tokens: 50000
   max_wall_clock_seconds: 300

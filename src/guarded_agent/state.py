@@ -37,6 +37,7 @@ class BudgetCounters(BaseModel):
     steps_used: int = 0
     tool_calls_used: int = 0
     tokens_used: int = 0
+    elapsed_seconds: float = 0.0
 
     def increment(self, *, steps: int = 0, tool_calls: int = 0, tokens: int = 0) -> BudgetCounters:
         """Return a new BudgetCounters with the given deltas applied."""
@@ -47,6 +48,16 @@ class BudgetCounters(BaseModel):
                 "tokens_used": self.tokens_used + tokens,
             }
         )
+
+    def with_elapsed(self, seconds: float) -> BudgetCounters:
+        """Return a new BudgetCounters with elapsed_seconds set to `seconds`.
+
+        Set, not incremented: elapsed time is a running total since
+        conversation start, computed fresh each turn by whoever tracks the
+        start time (the adapter) -- not something this pure model can
+        compute itself without reading a clock.
+        """
+        return self.model_copy(update={"elapsed_seconds": seconds})
 
 
 class AgentState(BaseModel):

@@ -7,8 +7,17 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel
 
+from guarded_agent.config import BudgetConfig
+from guarded_agent.guardrails.budgets import check_budget
 from guarded_agent.state import AgentState, Message, ProposedAction, ToolCall
 from guarded_agent.tools.registry import ToolDefinition, ToolRegistry
+
+DEFAULT_BUDGET_LIMITS = BudgetConfig(
+    max_steps=1000, max_tool_calls=1000, max_tokens=10_000_000, max_wall_clock_seconds=3600
+)
+"""Generous fallback so tests/callers that don't care about budgets don't
+need to pass one. Real limits come from config.py's BudgetConfig (commit 4),
+loaded by whoever actually cares -- currently the tau2 adapter."""
 
 
 class AgentDecision(BaseModel):
@@ -39,6 +48,50 @@ def router(state: AgentState) -> Literal["executor", "agent"]:
     `executor` directly.
     """
     return "executor" if state.proposed_action is not None else "agent"
+
+
+def make_entry_router(
+    limits: BudgetConfig,
+) -> Callable[[AgentState], Literal["executor", "agent", "kill_switch"]]:
+    """Wrap `router` with a budget check that runs first.
+
+    Kept separate from `router` itself so `router`'s own tests (which
+    exercise the proposed_action routing logic in isolation) don't need a
+    BudgetConfig at all.
+    """
+
+    def entry_router(state: AgentState) -> Literal["executor", "agent", "kill_switch"]:
+        if check_budget(state.budget, limits).breached:
+            return "kill_switch"
+        return router(state)
+
+    return entry_router
+
+
+def make_kill_switch_node(limits: BudgetConfig) -> Callable[[AgentState], dict[str, Any]]:
+    """Graceful termination on budget breach: escalate and hand off, rather
+    than continuing to call the LLM or dispatch tools."""
+
+    def kill_switch(state: AgentState) -> dict[str, Any]:
+        verdict = check_budget(state.budget, limits)
+        reason = verdict.reason or "budget exceeded"
+        updated = state.add_message(
+            Message(
+                role="assistant",
+                content=(
+                    "I'm not able to continue with this request right now -- "
+                    "I've hit an internal limit and need to hand this off to a human."
+                ),
+            )
+        )
+        updated = updated.escalate(reason)
+        return {
+            "conversation": updated.conversation,
+            "escalated": updated.escalated,
+            "escalation_reason": updated.escalation_reason,
+        }
+
+    return kill_switch
 
 
 def make_executor_node(registry: ToolRegistry) -> Callable[[AgentState], dict[str, Any]]:
@@ -83,7 +136,9 @@ def make_agent_node(
 
     def agent(state: AgentState) -> dict[str, Any]:
         decision = generate_fn(state.conversation, list(registry.tools.values()))
-        budget = state.budget.increment(tokens=decision.prompt_tokens + decision.completion_tokens)
+        budget = state.budget.increment(
+            steps=1, tokens=decision.prompt_tokens + decision.completion_tokens
+        )
 
         if decision.tool_call is not None:
             updated = state.add_message(Message(role="assistant", tool_calls=[decision.tool_call]))
@@ -106,15 +161,22 @@ def make_agent_node(
 def build_graph(
     generate_fn: GenerateFn,
     registry: ToolRegistry | None = None,
+    budget_limits: BudgetConfig = DEFAULT_BUDGET_LIMITS,
 ) -> CompiledStateGraph[AgentState]:
     registry = registry or ToolRegistry.load()
 
     graph = StateGraph(AgentState)
     graph.add_node("executor", make_executor_node(registry))  # type: ignore[call-overload]
     graph.add_node("agent", make_agent_node(generate_fn, registry))  # type: ignore[call-overload]
-    graph.add_conditional_edges(START, router, {"executor": "executor", "agent": "agent"})
+    graph.add_node("kill_switch", make_kill_switch_node(budget_limits))  # type: ignore[call-overload]
+    graph.add_conditional_edges(
+        START,
+        make_entry_router(budget_limits),
+        {"executor": "executor", "agent": "agent", "kill_switch": "kill_switch"},
+    )
     graph.add_edge("executor", "agent")
     graph.add_edge("agent", END)
+    graph.add_edge("kill_switch", END)
 
     return graph.compile()
 

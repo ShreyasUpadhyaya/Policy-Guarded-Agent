@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from tau2.agent.base.llm_config import LLMConfigMixin
@@ -14,6 +15,7 @@ from tau2.environment.tool import Tool as Tau2Tool
 from tau2.registry import registry as tau2_registry
 from tau2.utils.llm_utils import generate as tau2_generate
 
+from guarded_agent.config import load_config
 from guarded_agent.graph import AgentDecision, GenerateFn, build_graph
 from guarded_agent.graph import run as run_graph
 from guarded_agent.state import AgentState, Message, ToolCall
@@ -170,9 +172,12 @@ class GuardedTau2Agent(LLMConfigMixin, HalfDuplexAgent[AgentState]):  # type: ig
         generate_fn = make_tau2_generate_fn(
             tools, llm, self.llm_args, domain_policy, self._last_generation
         )
-        self.app = build_graph(generate_fn, registry)
+        budget_limits = load_config().budget
+        self.app = build_graph(generate_fn, registry, budget_limits)
+        self._started_at = time.time()
 
     def get_init_state(self, message_history: list[Tau2Message] | None = None) -> AgentState:
+        self._started_at = time.time()
         state = AgentState()
         for message in message_history or []:
             for our_message in _to_our_messages(message):
@@ -185,10 +190,19 @@ class GuardedTau2Agent(LLMConfigMixin, HalfDuplexAgent[AgentState]):  # type: ig
         for our_message in _to_our_messages(message):
             state = state.add_message(our_message)
 
+        elapsed = time.time() - self._started_at
+        state = state.model_copy(update={"budget": state.budget.with_elapsed(elapsed)})
+
         state = run_graph(self.app, state)
 
-        cost = self._last_generation.cost
-        usage = self._last_generation.usage
+        # The kill switch (budget breach) produces a message without calling the
+        # LLM this turn -- attaching self._last_generation's cost/usage there
+        # would misattribute a *previous* turn's figures to a free message.
+        if state.escalated:
+            cost, usage = None, None
+        else:
+            cost = self._last_generation.cost
+            usage = self._last_generation.usage
 
         if state.proposed_action is not None:
             action = state.proposed_action

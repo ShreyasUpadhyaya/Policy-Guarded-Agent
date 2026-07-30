@@ -14,6 +14,7 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "default
 
 
 class BudgetConfig(BaseModel):
+    max_steps: int
     max_tool_calls: int
     max_tokens: int
     max_wall_clock_seconds: int

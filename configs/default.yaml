@@ -12,6 +12,10 @@ max_retries: 4
 save_to: wrapper-smoke
 
 budget:
-  max_tool_calls: 20
-  max_tokens: 50000
+  # max_tokens is the binding constraint in practice: commit 5's baseline showed
+  # real retail tasks use 80k-122k tokens each (evals/results/baseline_smoke/),
+  # so 200000 gives headroom above the observed range rather than guessing.
+  max_steps: 40
+  max_tool_calls: 30
+  max_tokens: 200000
   max_wall_clock_seconds: 300
