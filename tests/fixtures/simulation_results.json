@@ -1,0 +1,98 @@
+{
+  "timestamp": "2026-07-29T22:41:57.786091",
+  "info": {
+    "environment_info": {
+      "domain_name": "retail"
+    }
+  },
+  "simulations": [
+    {
+      "id": "sim-1",
+      "task_id": "0",
+      "trial": 0,
+      "termination_reason": "user_stop",
+      "agent_cost": 0.0790,
+      "user_cost": 0.0111,
+      "reward_info": {
+        "reward": 1.0,
+        "reward_breakdown": {
+          "DB": 1.0,
+          "NL_ASSERTION": 1.0
+        }
+      },
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "Hi! How can I help you today?",
+          "tool_calls": null,
+          "turn_idx": 0,
+          "cost": 0.0,
+          "usage": null
+        },
+        {
+          "role": "user",
+          "content": "I'd like to check my order status.",
+          "tool_calls": null,
+          "turn_idx": 1,
+          "cost": 0.0021,
+          "usage": {"prompt_tokens": 400, "completion_tokens": 12}
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "toolu_1",
+              "name": "find_user_id_by_name_zip",
+              "arguments": {"first_name": "Yusuf", "last_name": "Rossi", "zip": "19122"},
+              "requestor": "assistant"
+            }
+          ],
+          "turn_idx": 2,
+          "cost": 0.0062,
+          "usage": {"prompt_tokens": 5650, "completion_tokens": 106}
+        },
+        {
+          "role": "tool",
+          "content": "yusuf_rossi_9620",
+          "requestor": "assistant",
+          "error": false,
+          "turn_idx": 3
+        }
+      ]
+    },
+    {
+      "id": "sim-2",
+      "task_id": "1",
+      "trial": 0,
+      "termination_reason": "user_stop",
+      "agent_cost": 0.1189,
+      "user_cost": 0.0129,
+      "reward_info": {
+        "reward": 0.0,
+        "reward_breakdown": {
+          "DB": 1.0,
+          "NL_ASSERTION": 0.0
+        }
+      },
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "Hi! How can I help you today?",
+          "tool_calls": null,
+          "turn_idx": 0,
+          "cost": 0.0,
+          "usage": null
+        },
+        {
+          "role": "user",
+          "content": "How many t-shirts do you have in stock?",
+          "tool_calls": null,
+          "turn_idx": 1,
+          "cost": 0.0018,
+          "usage": {"prompt_tokens": 380, "completion_tokens": 10}
+        }
+      ]
+    }
+  ]
+}
