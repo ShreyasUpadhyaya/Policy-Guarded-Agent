@@ -20,6 +20,14 @@ class BudgetConfig(BaseModel):
     max_wall_clock_seconds: int
 
 
+class PolicyRetrievalConfig(BaseModel):
+    top_k: int
+    min_confidence: float
+    """Below this similarity score, retrieval is treated as low-confidence and
+    falls back to the full policy text -- see guardrails/policy_retrieval.py.
+    Explicit here per PLAN.md commit 15, not a magic number in code."""
+
+
 class RunConfig(BaseModel):
     domain: str
     agent_llm: str
@@ -34,17 +42,22 @@ class RunConfig(BaseModel):
     max_retries: int
     save_to: str
     budget: BudgetConfig
+    retrieval: PolicyRetrievalConfig
+
+
+_NESTED_FIELDS = {"budget", "retrieval"}
 
 
 def _apply_env_overrides(raw: dict[str, Any], env: Mapping[str, str]) -> dict[str, Any]:
     """Overlay `GUARDED_AGENT_<FIELD>` env vars onto a loaded YAML dict.
 
-    Only overrides top-level scalar fields; `budget.*` is left to YAML, since
-    nothing outside this module needs to override it per-run yet.
+    Only overrides top-level scalar fields; nested config blocks (budget,
+    retrieval) are left to YAML, since nothing outside this module needs to
+    override them per-run yet.
     """
     merged = dict(raw)
     for field in RunConfig.model_fields:
-        if field == "budget":
+        if field in _NESTED_FIELDS:
             continue
         env_key = f"{ENV_PREFIX}{field.upper()}"
         if env_key in env:

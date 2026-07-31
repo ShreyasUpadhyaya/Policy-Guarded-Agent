@@ -19,3 +19,10 @@ budget:
   max_tool_calls: 30
   max_tokens: 200000
   max_wall_clock_seconds: 300
+
+retrieval:
+  # Empirically calibrated against the real retail policy.md (guardrails/policy_retrieval.py):
+  # correct top-1 matches scored ~0.42-0.46, an off-topic query's best match scored negative.
+  # 0.3 sits clearly between the two, not a guess.
+  top_k: 3
+  min_confidence: 0.3

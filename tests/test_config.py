@@ -26,6 +26,10 @@ budget:
   max_tool_calls: 20
   max_tokens: 50000
   max_wall_clock_seconds: 300
+
+retrieval:
+  top_k: 3
+  min_confidence: 0.5
 """
 
 
