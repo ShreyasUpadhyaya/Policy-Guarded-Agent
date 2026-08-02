@@ -61,11 +61,15 @@ def _to_our_messages(message: Tau2Message) -> list[Message]:
         return [Message(role="assistant", content=message.content, tool_calls=tool_calls)]
     if isinstance(message, MultiToolMessage):
         return [
-            Message(role="tool", content=tm.content, tool_call_id=tm.id)
+            Message(role="tool", content=tm.content, tool_call_id=tm.id, error=tm.error)
             for tm in message.tool_messages
         ]
     if isinstance(message, Tau2ToolMessage):
-        return [Message(role="tool", content=message.content, tool_call_id=message.id)]
+        return [
+            Message(
+                role="tool", content=message.content, tool_call_id=message.id, error=message.error
+            )
+        ]
     raise TypeError(f"Unsupported tau2 message type: {type(message).__name__}")
 
 
@@ -217,6 +221,8 @@ class GuardedTau2Agent(LLMConfigMixin, HalfDuplexAgent[AgentState]):  # type: ig
             retrieval_top_k=run_config.retrieval.top_k,
             retrieval_min_confidence=run_config.retrieval.min_confidence,
             session_id=str(uuid.uuid4()),
+            max_consecutive_tool_failures=run_config.escalation.max_consecutive_tool_failures,
+            max_consecutive_policy_denials=run_config.escalation.max_consecutive_policy_denials,
         )
         self._started_at = time.time()
 

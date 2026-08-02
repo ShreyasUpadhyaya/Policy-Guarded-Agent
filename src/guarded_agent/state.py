@@ -17,6 +17,8 @@ class Message(BaseModel):
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
     """For role="tool": which proposed ToolCall.id this message answers."""
+    error: bool = False
+    """For role="tool": whether the tool call this message reports on failed."""
 
 
 class ProposedAction(BaseModel):
@@ -69,6 +71,13 @@ class AgentState(BaseModel):
     """A mutating action the write gate already presented for confirmation,
     awaiting the user's explicit yes/no before it can be proposed again and
     let through."""
+    consecutive_policy_denials: int = 0
+    """Incremented by the policy gate on DENY, reset on any other verdict.
+    Tool-failure streaks aren't tracked this way -- they're derived fresh
+    from conversation history (see guardrails/escalation.py) since
+    Message.error already carries everything needed, without a second
+    mutable counter that could drift out of sync with the messages
+    themselves."""
     budget: BudgetCounters = Field(default_factory=BudgetCounters)
     escalated: bool = False
     escalation_reason: str | None = None

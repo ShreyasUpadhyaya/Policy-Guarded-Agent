@@ -17,7 +17,7 @@ from guarded_agent.state import (
     ProposedAction,
     ToolCall,
 )
-from guarded_agent.tools.registry import ToolDefinition
+from guarded_agent.tools.registry import ToolDefinition, ToolRegistry
 
 MOCK_TASKS_PATH = (
     Path(__file__).resolve().parents[1]
@@ -182,6 +182,134 @@ def test_kill_switch_takes_priority_over_a_pending_proposed_action() -> None:
     result = run(app, state)
 
     assert result.escalated is True
+
+
+def test_repeated_tool_failure_triggers_escalation_without_calling_generate_fn() -> None:
+    app = build_graph(_never_call, max_consecutive_tool_failures=2)
+    state = AgentState(
+        conversation=[
+            Message(role="user", content="hi"),
+            Message(
+                role="assistant",
+                tool_calls=[ToolCall(id="1", name="get_order_details", arguments={})],
+            ),
+            Message(role="tool", content="boom", tool_call_id="1", error=True),
+            Message(
+                role="assistant",
+                tool_calls=[ToolCall(id="2", name="get_order_details", arguments={})],
+            ),
+            Message(role="tool", content="boom", tool_call_id="2", error=True),
+        ]
+    )
+
+    result = run(app, state)
+
+    assert result.escalated is True
+    assert result.escalation_reason is not None
+    assert "2 consecutive tool failures" in result.escalation_reason
+
+
+def test_tool_failures_below_threshold_do_not_escalate() -> None:
+    app = build_graph(_stub_text("Let me try something else."), max_consecutive_tool_failures=3)
+    state = AgentState(
+        conversation=[
+            Message(role="user", content="hi"),
+            Message(
+                role="assistant",
+                tool_calls=[ToolCall(id="1", name="get_order_details", arguments={})],
+            ),
+            Message(role="tool", content="boom", tool_call_id="1", error=True),
+        ]
+    )
+
+    result = run(app, state)
+
+    assert result.escalated is False
+
+
+def test_policy_deadlock_triggers_escalation_without_calling_generate_fn() -> None:
+    app = build_graph(_never_call, max_consecutive_policy_denials=2)
+    state = AgentState(
+        conversation=[Message(role="user", content="hi")],
+        consecutive_policy_denials=2,
+    )
+
+    result = run(app, state)
+
+    assert result.escalated is True
+    assert result.escalation_reason is not None
+    assert "2 consecutive policy denials" in result.escalation_reason
+
+
+def test_policy_denials_below_threshold_do_not_escalate() -> None:
+    app = build_graph(_stub_text("How can I help?"), max_consecutive_policy_denials=3)
+    state = AgentState(
+        conversation=[Message(role="user", content="hi")],
+        consecutive_policy_denials=2,
+    )
+
+    result = run(app, state)
+
+    assert result.escalated is False
+
+
+_TRANSFER_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {"summary": {"type": "string"}},
+    "required": ["summary"],
+}
+
+
+def _registry_with_transfer_tool() -> ToolRegistry:
+    return ToolRegistry(
+        {
+            "transfer_to_human_agents": ToolDefinition(
+                name="transfer_to_human_agents",
+                description="Hand off the conversation to a human agent.",
+                mutating=True,
+                risk_tier="high",
+                parameters=_TRANSFER_TOOL_SCHEMA,
+            )
+        }
+    )
+
+
+def test_escalation_proposes_transfer_tool_when_registry_has_it() -> None:
+    app = build_graph(
+        _never_call, registry=_registry_with_transfer_tool(), max_consecutive_policy_denials=1
+    )
+    state = AgentState(
+        conversation=[Message(role="user", content="hi")],
+        consecutive_policy_denials=1,
+    )
+
+    result = run(app, state)
+
+    assert result.escalated is True
+    assert result.proposed_action is not None
+    assert result.proposed_action.tool_name == "transfer_to_human_agents"
+    last_message = result.conversation[-1]
+    assert last_message.role == "assistant"
+    assert last_message.tool_calls is not None
+    assert last_message.tool_calls[0].name == "transfer_to_human_agents"
+
+
+def test_escalation_falls_back_to_text_when_transfer_tool_not_registered() -> None:
+    # default registry (loaded from registry.yaml) has no transfer_to_human_agents tool
+    app = build_graph(_never_call, max_consecutive_policy_denials=1)
+    state = AgentState(
+        conversation=[Message(role="user", content="hi")],
+        consecutive_policy_denials=1,
+    )
+
+    result = run(app, state)
+
+    assert result.escalated is True
+    assert result.proposed_action is None
+    last_message = result.conversation[-1]
+    assert last_message.role == "assistant"
+    assert last_message.tool_calls is None
+    assert last_message.content is not None
 
 
 class _StubRetriever:

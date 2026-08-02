@@ -28,6 +28,11 @@ class PolicyRetrievalConfig(BaseModel):
     Explicit here per PLAN.md commit 15, not a magic number in code."""
 
 
+class EscalationConfig(BaseModel):
+    max_consecutive_tool_failures: int
+    max_consecutive_policy_denials: int
+
+
 class RunConfig(BaseModel):
     domain: str
     agent_llm: str
@@ -43,9 +48,10 @@ class RunConfig(BaseModel):
     save_to: str
     budget: BudgetConfig
     retrieval: PolicyRetrievalConfig
+    escalation: EscalationConfig
 
 
-_NESTED_FIELDS = {"budget", "retrieval"}
+_NESTED_FIELDS = {"budget", "retrieval", "escalation"}
 
 
 def _apply_env_overrides(raw: dict[str, Any], env: Mapping[str, str]) -> dict[str, Any]:

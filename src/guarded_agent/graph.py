@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from guarded_agent.config import BudgetConfig
 from guarded_agent.guardrails.budgets import check_budget
+from guarded_agent.guardrails.escalation import check_policy_deadlock, check_repeated_tool_failure
 from guarded_agent.guardrails.policy_checker import PolicyCheckFn, check_policy
 from guarded_agent.guardrails.policy_retrieval import PolicyRetriever, get_policy_context
 from guarded_agent.guardrails.write_gate import DispatchCache, evaluate_write_gate
@@ -24,6 +25,16 @@ DEFAULT_BUDGET_LIMITS = BudgetConfig(
 """Generous fallback so tests/callers that don't care about budgets don't
 need to pass one. Real limits come from config.py's BudgetConfig (commit 4),
 loaded by whoever actually cares -- currently the tau2 adapter."""
+
+DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES = 1000
+DEFAULT_MAX_CONSECUTIVE_POLICY_DENIALS = 1000
+"""Same rationale as DEFAULT_BUDGET_LIMITS: generous fallbacks so callers
+that don't care about escalation thresholds don't need to pass them."""
+
+TRANSFER_TOOL_NAME = "transfer_to_human_agents"
+"""tau2's own convention for a human handoff tool, named explicitly in
+several domains' policies (including retail's). When the registry has it,
+escalation proposes a real tool call instead of just saying so in text."""
 
 
 class AgentDecision(BaseModel):
@@ -57,18 +68,30 @@ def router(state: AgentState) -> Literal["executor", "agent"]:
 
 
 def make_entry_router(
-    limits: BudgetConfig,
-) -> Callable[[AgentState], Literal["executor", "agent", "kill_switch"]]:
-    """Wrap `router` with a budget check that runs first.
+    budget_limits: BudgetConfig,
+    max_consecutive_tool_failures: int = DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES,
+    max_consecutive_policy_denials: int = DEFAULT_MAX_CONSECUTIVE_POLICY_DENIALS,
+) -> Callable[[AgentState], Literal["executor", "agent", "escalation"]]:
+    """Wrap `router` with the three escalation triggers (PLAN.md commit 18),
+    checked before anything else runs this turn.
 
     Kept separate from `router` itself so `router`'s own tests (which
-    exercise the proposed_action routing logic in isolation) don't need a
-    BudgetConfig at all.
+    exercise the proposed_action routing logic in isolation) don't need any
+    of these configs at all.
     """
 
-    def entry_router(state: AgentState) -> Literal["executor", "agent", "kill_switch"]:
-        if check_budget(state.budget, limits).breached:
-            return "kill_switch"
+    def entry_router(state: AgentState) -> Literal["executor", "agent", "escalation"]:
+        if check_budget(state.budget, budget_limits).breached:
+            return "escalation"
+        failure_check = check_repeated_tool_failure(
+            state.conversation, max_consecutive_tool_failures
+        )
+        if failure_check.should_escalate:
+            return "escalation"
+        if check_policy_deadlock(
+            state.consecutive_policy_denials, max_consecutive_policy_denials
+        ).should_escalate:
+            return "escalation"
         return router(state)
 
     return entry_router
@@ -87,14 +110,59 @@ def after_policy_gate_router(state: AgentState) -> Literal["write_gate", "end"]:
     return "write_gate" if state.proposed_action is not None else "end"
 
 
-def make_kill_switch_node(limits: BudgetConfig) -> Callable[[AgentState], dict[str, Any]]:
-    """Graceful termination on budget breach: escalate and hand off, rather
-    than continuing to call the LLM or dispatch tools."""
+def make_escalation_node(
+    registry: ToolRegistry,
+    budget_limits: BudgetConfig,
+    max_consecutive_tool_failures: int,
+    max_consecutive_policy_denials: int,
+) -> Callable[[AgentState], dict[str, Any]]:
+    """Graceful termination on any of three triggers (budget breach, repeated
+    tool failure, policy deadlock -- PLAN.md commit 18): escalate rather
+    than continuing to call the LLM or dispatch tools.
 
-    def kill_switch(state: AgentState) -> dict[str, Any]:
-        verdict = check_budget(state.budget, limits)
-        reason = verdict.reason or "budget exceeded"
-        updated = state.add_message(
+    Recomputes which trigger fired (make_entry_router only decided *that*
+    escalation was needed, not *why*) to report an accurate reason. If the
+    domain registers a transfer_to_human_agents tool, proposes that call so
+    tau2 records a real transfer instead of just a text message saying so;
+    the proposal bypasses policy_gate/write_gate deliberately -- routing an
+    escalation caused by policy deadlock back through the policy gate risks
+    another denial, defeating the point of escalating.
+    """
+
+    def escalation(state: AgentState) -> dict[str, Any]:
+        budget_verdict = check_budget(state.budget, budget_limits)
+        failure_verdict = check_repeated_tool_failure(
+            state.conversation, max_consecutive_tool_failures
+        )
+        deadlock_verdict = check_policy_deadlock(
+            state.consecutive_policy_denials, max_consecutive_policy_denials
+        )
+        reason = (
+            budget_verdict.reason
+            or failure_verdict.reason
+            or deadlock_verdict.reason
+            or "escalated"
+        )
+        updated = state.escalate(reason)
+
+        transfer_tool = registry.get(TRANSFER_TOOL_NAME)
+        if transfer_tool is not None:
+            call = ToolCall(
+                id=f"escalation-{uuid.uuid4()}",
+                name=TRANSFER_TOOL_NAME,
+                arguments={"summary": reason},
+            )
+            updated = updated.add_message(Message(role="assistant", tool_calls=[call]))
+            return {
+                "conversation": updated.conversation,
+                "escalated": updated.escalated,
+                "escalation_reason": updated.escalation_reason,
+                "proposed_action": ProposedAction(
+                    id=call.id, tool_name=call.name, arguments=call.arguments
+                ),
+            }
+
+        updated = updated.add_message(
             Message(
                 role="assistant",
                 content=(
@@ -103,14 +171,13 @@ def make_kill_switch_node(limits: BudgetConfig) -> Callable[[AgentState], dict[s
                 ),
             )
         )
-        updated = updated.escalate(reason)
         return {
             "conversation": updated.conversation,
             "escalated": updated.escalated,
             "escalation_reason": updated.escalation_reason,
         }
 
-    return kill_switch
+    return escalation
 
 
 def make_executor_node(
@@ -264,9 +331,10 @@ def make_policy_gate_node(
                 "conversation": updated.conversation,
                 "proposed_action": None,
                 "policy_verdict": verdict,
+                "consecutive_policy_denials": state.consecutive_policy_denials + 1,
             }
 
-        return {"policy_verdict": verdict}
+        return {"policy_verdict": verdict, "consecutive_policy_denials": 0}
 
     return policy_gate
 
@@ -323,6 +391,8 @@ def build_graph(
     retrieval_min_confidence: float = 0.3,
     session_id: str | None = None,
     dispatch_cache: DispatchCache | None = None,
+    max_consecutive_tool_failures: int = DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES,
+    max_consecutive_policy_denials: int = DEFAULT_MAX_CONSECUTIVE_POLICY_DENIALS,
 ) -> CompiledStateGraph[AgentState]:
     registry = registry or ToolRegistry.load()
     session_id = session_id or str(uuid.uuid4())
@@ -333,14 +403,20 @@ def build_graph(
         traced_node("executor", make_executor_node(registry, session_id, dispatch_cache)),
     )  # type: ignore[call-overload]
     graph.add_node("agent", traced_node("agent", make_agent_node(generate_fn, registry)))  # type: ignore[call-overload]
-    graph.add_node("kill_switch", traced_node("kill_switch", make_kill_switch_node(budget_limits)))  # type: ignore[call-overload]
+    escalation_node = make_escalation_node(
+        registry, budget_limits, max_consecutive_tool_failures, max_consecutive_policy_denials
+    )
+    graph.add_node("escalation", traced_node("escalation", escalation_node))  # type: ignore[call-overload]
+    entry_router = make_entry_router(
+        budget_limits, max_consecutive_tool_failures, max_consecutive_policy_denials
+    )
     graph.add_conditional_edges(
         START,
-        make_entry_router(budget_limits),
-        {"executor": "executor", "agent": "agent", "kill_switch": "kill_switch"},
+        entry_router,
+        {"executor": "executor", "agent": "agent", "escalation": "escalation"},
     )
     graph.add_edge("executor", "agent")
-    graph.add_edge("kill_switch", END)
+    graph.add_edge("escalation", END)
 
     if policy_check_fn is not None and retriever is not None:
         graph.add_node(

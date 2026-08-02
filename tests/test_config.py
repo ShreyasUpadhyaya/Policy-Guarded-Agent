@@ -30,6 +30,10 @@ budget:
 retrieval:
   top_k: 3
   min_confidence: 0.5
+
+escalation:
+  max_consecutive_tool_failures: 3
+  max_consecutive_policy_denials: 3
 """
 
 
