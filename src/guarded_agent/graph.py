@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from guarded_agent.config import BudgetConfig
 from guarded_agent.guardrails.budgets import check_budget
+from guarded_agent.guardrails.critic import CriticCheckFn, check_response
 from guarded_agent.guardrails.escalation import check_policy_deadlock, check_repeated_tool_failure
 from guarded_agent.guardrails.policy_checker import PolicyCheckFn, check_policy
 from guarded_agent.guardrails.policy_retrieval import PolicyRetriever, get_policy_context
@@ -97,10 +98,25 @@ def make_entry_router(
     return entry_router
 
 
-def after_agent_router(state: AgentState) -> Literal["policy_gate", "end"]:
+def make_after_agent_router(
+    has_critic: bool,
+) -> Callable[[AgentState], Literal["policy_gate", "critic", "end"]]:
     """A proposed tool call must clear the policy gate before it can be sent
-    out; a plain text reply needs no policy check."""
-    return "policy_gate" if state.proposed_action is not None else "end"
+    out. A plain text reply either goes to the critic (PLAN.md commit 20,
+    if one is configured) or straight out -- except a reply the agent node
+    already escalated on (an empty decision, see make_agent_node) skips the
+    critic entirely, since there is no drafted response left to review, only
+    the hand-off message the agent node already appended.
+    """
+
+    def after_agent_router(state: AgentState) -> Literal["policy_gate", "critic", "end"]:
+        if state.proposed_action is not None:
+            return "policy_gate"
+        if state.escalated or not has_critic:
+            return "end"
+        return "critic"
+
+    return after_agent_router
 
 
 def after_policy_gate_router(state: AgentState) -> Literal["write_gate", "end"]:
@@ -108,6 +124,30 @@ def after_policy_gate_router(state: AgentState) -> Literal["write_gate", "end"]:
     schema -- if it's still set, the action was allowed through to the
     write gate; if not, the turn already has its answer."""
     return "write_gate" if state.proposed_action is not None else "end"
+
+
+def after_critic_router(state: AgentState) -> Literal["agent_revise", "end"]:
+    """A REVISE verdict leaves critic_feedback set (and the rejected draft
+    already popped off conversation, see make_critic_node) -- route to the
+    one bounded revision. An APPROVE verdict is a no-op: the draft already
+    sits in conversation, ready to send."""
+    return "agent_revise" if state.critic_feedback is not None else "end"
+
+
+def after_agent_revise_router(state: AgentState) -> Literal["critic_final", "end"]:
+    """agent_revise escalates directly (and ends the turn there) if the
+    revision itself wasn't usable text -- nothing left to review. Otherwise
+    the revised draft gets exactly one more critic pass."""
+    return "end" if state.escalated else "critic_final"
+
+
+def after_critic_final_router(state: AgentState) -> Literal["escalation", "end"]:
+    """The bounded end of the critic loop (PLAN.md commit 20: "at most one
+    revision loop, then it must proceed or escalate"). A second REVISE
+    verdict here never leads back to agent_revise -- only to escalation --
+    which is what makes the loop structurally bounded rather than merely
+    counted."""
+    return "escalation" if state.critic_feedback is not None else "end"
 
 
 def make_escalation_node(
@@ -121,12 +161,14 @@ def make_escalation_node(
     than continuing to call the LLM or dispatch tools.
 
     Recomputes which trigger fired (make_entry_router only decided *that*
-    escalation was needed, not *why*) to report an accurate reason. If the
-    domain registers a transfer_to_human_agents tool, proposes that call so
-    tau2 records a real transfer instead of just a text message saying so;
-    the proposal bypasses policy_gate/write_gate deliberately -- routing an
-    escalation caused by policy deadlock back through the policy gate risks
-    another denial, defeating the point of escalating.
+    escalation was needed, not *why*) to report an accurate reason -- now
+    including a second critic rejection (PLAN.md commit 20), the one
+    trigger this node can't detect from state.budget/conversation alone.
+    If the domain registers a transfer_to_human_agents tool, proposes that
+    call so tau2 records a real transfer instead of just a text message
+    saying so; the proposal bypasses policy_gate/write_gate deliberately --
+    routing an escalation caused by policy deadlock back through the policy
+    gate risks another denial, defeating the point of escalating.
     """
 
     def escalation(state: AgentState) -> dict[str, Any]:
@@ -137,10 +179,16 @@ def make_escalation_node(
         deadlock_verdict = check_policy_deadlock(
             state.consecutive_policy_denials, max_consecutive_policy_denials
         )
+        critic_reason = (
+            f"critic rejected the revised response: {state.critic_feedback}"
+            if state.critic_feedback
+            else None
+        )
         reason = (
             budget_verdict.reason
             or failure_verdict.reason
             or deadlock_verdict.reason
+            or critic_reason
             or "escalated"
         )
         updated = state.escalate(reason)
@@ -160,6 +208,7 @@ def make_escalation_node(
                 "proposed_action": ProposedAction(
                     id=call.id, tool_name=call.name, arguments=call.arguments
                 ),
+                "critic_feedback": None,
             }
 
         updated = updated.add_message(
@@ -175,6 +224,7 @@ def make_escalation_node(
             "conversation": updated.conversation,
             "escalated": updated.escalated,
             "escalation_reason": updated.escalation_reason,
+            "critic_feedback": None,
         }
 
     return escalation
@@ -380,6 +430,99 @@ def make_write_gate_node(registry: ToolRegistry) -> Callable[[AgentState], dict[
     return write_gate
 
 
+def make_critic_node(
+    critic_check_fn: CriticCheckFn,
+    retriever: PolicyRetriever,
+    full_policy_text: str,
+    top_k: int,
+    min_confidence: float,
+) -> Callable[[AgentState], dict[str, Any]]:
+    """Review a drafted text response for unsupported claims and policy
+    drift (PLAN.md commit 20) before it goes out. Only reachable for text
+    replies -- tool-call proposals are already gated by policy_gate/write_gate
+    and never pass through here (see make_after_agent_router).
+
+    Used for both the first and second (final) critic pass -- the same
+    node function is added to the graph under two different node names,
+    each wired to a different router, so the bounded-retry guarantee comes
+    from the graph's topology (see build_graph) rather than a counter this
+    node would have to remember to check.
+
+    An APPROVE verdict is a no-op: the draft already sits in conversation,
+    ready to send. A REVISE verdict pops the rejected draft back off
+    conversation -- the user never saw it -- and records the critic's
+    reason in critic_feedback for the next node (agent_revise, or
+    escalation on the second pass) to consume.
+    """
+
+    def critic(state: AgentState) -> dict[str, Any]:
+        draft = state.conversation[-1]
+        if draft.role != "assistant" or not draft.content:
+            raise ValueError("critic node reached without a drafted text response")
+
+        context = get_policy_context(
+            retriever, draft.content, full_policy_text, top_k, min_confidence
+        )
+        verdict = check_response(state.conversation[:-1], draft.content, context, critic_check_fn)
+        if verdict.approved:
+            return {}
+
+        return {"conversation": state.conversation[:-1], "critic_feedback": verdict.reason}
+
+    return critic
+
+
+def make_agent_revise_node(
+    generate_fn: GenerateFn, registry: ToolRegistry
+) -> Callable[[AgentState], dict[str, Any]]:
+    """The critic's one bounded revision (PLAN.md commit 20). Regenerates a
+    response with the critic's feedback appended as a one-off note -- never
+    persisted into conversation itself, only used to steer this single
+    regeneration call -- then always clears critic_feedback, so nothing
+    about this pass can linger into a state a future turn might see.
+
+    A revision that still isn't usable plain text (empty, or a tool call --
+    the critic asked for a corrected reply, not a change of plan) escalates
+    immediately rather than looping again: the same fail-safe-forcing rule
+    make_agent_node applies to an empty first-pass decision.
+    """
+
+    def agent_revise(state: AgentState) -> dict[str, Any]:
+        revision_note = (
+            "[Internal note: your previous draft was rejected by review -- "
+            f"{state.critic_feedback}. Provide a corrected response addressing this.]"
+        )
+        revision_conversation = [*state.conversation, Message(role="user", content=revision_note)]
+        decision = generate_fn(revision_conversation, list(registry.tools.values()))
+        budget = state.budget.increment(
+            steps=1, tokens=decision.prompt_tokens + decision.completion_tokens
+        )
+
+        if not decision.content or decision.tool_call is not None:
+            escalated = state.escalate("revised response was not usable after one critic revision")
+            escalated = escalated.add_message(
+                Message(
+                    role="assistant",
+                    content=(
+                        "I'm not able to give you a reliable answer right now -- "
+                        "handing this off to a human."
+                    ),
+                )
+            )
+            return {
+                "conversation": escalated.conversation,
+                "escalated": escalated.escalated,
+                "escalation_reason": escalated.escalation_reason,
+                "budget": budget,
+                "critic_feedback": None,
+            }
+
+        updated = state.add_message(Message(role="assistant", content=decision.content))
+        return {"conversation": updated.conversation, "budget": budget, "critic_feedback": None}
+
+    return agent_revise
+
+
 def build_graph(
     generate_fn: GenerateFn,
     registry: ToolRegistry | None = None,
@@ -389,6 +532,7 @@ def build_graph(
     full_policy_text: str = "",
     retrieval_top_k: int = 3,
     retrieval_min_confidence: float = 0.3,
+    critic_check_fn: CriticCheckFn | None = None,
     session_id: str | None = None,
     dispatch_cache: DispatchCache | None = None,
     max_consecutive_tool_failures: int = DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES,
@@ -434,13 +578,47 @@ def build_graph(
             ),
         )  # type: ignore[call-overload]
         graph.add_node("write_gate", traced_node("write_gate", make_write_gate_node(registry)))  # type: ignore[call-overload]
+
+        after_agent_mapping: dict[Hashable, str] = {"policy_gate": "policy_gate", "end": END}
+        if critic_check_fn is not None:
+            after_agent_mapping["critic"] = "critic"
         graph.add_conditional_edges(
-            "agent", after_agent_router, {"policy_gate": "policy_gate", "end": END}
+            "agent", make_after_agent_router(critic_check_fn is not None), after_agent_mapping
         )
         graph.add_conditional_edges(
             "policy_gate", after_policy_gate_router, {"write_gate": "write_gate", "end": END}
         )
         graph.add_edge("write_gate", END)
+
+        if critic_check_fn is not None:
+            critic_node_fn = make_critic_node(
+                critic_check_fn,
+                retriever,
+                full_policy_text,
+                retrieval_top_k,
+                retrieval_min_confidence,
+            )
+            graph.add_node("critic", traced_node("critic", critic_node_fn))  # type: ignore[call-overload]
+            graph.add_conditional_edges(
+                "critic", after_critic_router, {"agent_revise": "agent_revise", "end": END}
+            )
+
+            graph.add_node(
+                "agent_revise",
+                traced_node("agent_revise", make_agent_revise_node(generate_fn, registry)),
+            )  # type: ignore[call-overload]
+            graph.add_conditional_edges(
+                "agent_revise",
+                after_agent_revise_router,
+                {"critic_final": "critic_final", "end": END},
+            )
+
+            graph.add_node("critic_final", traced_node("critic_final", critic_node_fn))  # type: ignore[call-overload]
+            graph.add_conditional_edges(
+                "critic_final",
+                after_critic_final_router,
+                {"escalation": "escalation", "end": END},
+            )
     else:
         # No policy checker wired in (e.g. tests exercising router/executor/agent
         # in isolation, as commit 10 already established) -- a proposed action

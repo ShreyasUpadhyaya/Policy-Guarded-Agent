@@ -20,6 +20,7 @@ from tau2.utils.llm_utils import generate as tau2_generate
 from guarded_agent.config import load_config
 from guarded_agent.graph import AgentDecision, GenerateFn, build_graph
 from guarded_agent.graph import run as run_graph
+from guarded_agent.guardrails.critic import make_llm_critic_check_fn
 from guarded_agent.guardrails.policy_checker import make_llm_policy_check_fn
 from guarded_agent.guardrails.policy_retrieval import PolicyRetriever
 from guarded_agent.state import AgentState, Message, ToolCall
@@ -220,6 +221,7 @@ class GuardedTau2Agent(LLMConfigMixin, HalfDuplexAgent[AgentState]):  # type: ig
             full_policy_text=domain_policy,
             retrieval_top_k=run_config.retrieval.top_k,
             retrieval_min_confidence=run_config.retrieval.min_confidence,
+            critic_check_fn=make_llm_critic_check_fn(llm),
             session_id=str(uuid.uuid4()),
             max_consecutive_tool_failures=run_config.escalation.max_consecutive_tool_failures,
             max_consecutive_policy_denials=run_config.escalation.max_consecutive_policy_denials,

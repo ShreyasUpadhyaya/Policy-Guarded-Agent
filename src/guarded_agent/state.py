@@ -78,6 +78,13 @@ class AgentState(BaseModel):
     Message.error already carries everything needed, without a second
     mutable counter that could drift out of sync with the messages
     themselves."""
+    critic_feedback: str | None = None
+    """Set by the critic node when it rejects a drafted response, holding
+    the reason agent_revise's one bounded regeneration call should address.
+    Always cleared back to None by end of turn on every path that sets it
+    (agent_revise, and the escalation node if a second rejection triggers
+    escalation) -- same transient, per-turn lifecycle as proposed_action,
+    never meant to persist into a future conversation turn."""
     budget: BudgetCounters = Field(default_factory=BudgetCounters)
     escalated: bool = False
     escalation_reason: str | None = None

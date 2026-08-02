@@ -7,6 +7,7 @@ import pytest
 
 from guarded_agent.config import BudgetConfig
 from guarded_agent.graph import AgentDecision, GenerateFn, build_graph, router, run
+from guarded_agent.guardrails.critic import CriticCheckFn, CriticVerdict
 from guarded_agent.guardrails.policy_checker import PolicyCheckFn
 from guarded_agent.guardrails.policy_retrieval import PolicyContext, RetrievedClause
 from guarded_agent.state import (
@@ -41,6 +42,20 @@ def _stub_text(content: str) -> GenerateFn:
 def _stub_tool_call(tool_call: ToolCall) -> GenerateFn:
     def _generate(conversation: list[Message], tools: list[ToolDefinition]) -> AgentDecision:
         return AgentDecision(tool_call=tool_call)
+
+    return _generate
+
+
+def _stub_text_sequence(contents: list[str]) -> GenerateFn:
+    """Returns `contents[0]` on the first call, `contents[1]` on the second,
+    and so on, holding on the last entry for any further call -- lets a test
+    give distinct answers to the initial agent call vs. agent_revise's call."""
+    calls = {"n": 0}
+
+    def _generate(conversation: list[Message], tools: list[ToolDefinition]) -> AgentDecision:
+        content = contents[min(calls["n"], len(contents) - 1)]
+        calls["n"] += 1
+        return AgentDecision(content=content)
 
     return _generate
 
@@ -445,6 +460,147 @@ def test_needs_confirmation_verdict_gates_even_a_non_mutating_tool() -> None:
 
     assert result.proposed_action is None
     assert result.pending_confirmation is not None
+
+
+def _stub_critic_check(approved: bool, reason: str = "because critic") -> CriticCheckFn:
+    def _check(conversation: list[Message], draft: str, context: PolicyContext) -> CriticVerdict:
+        return CriticVerdict(approved=approved, reason=reason)
+
+    return _check
+
+
+def _stub_critic_sequence(verdicts: list[tuple[bool, str]]) -> CriticCheckFn:
+    """Same idea as _stub_text_sequence, for the critic side of a
+    reject-then-approve revision test."""
+    calls = {"n": 0}
+
+    def _check(conversation: list[Message], draft: str, context: PolicyContext) -> CriticVerdict:
+        approved, reason = verdicts[min(calls["n"], len(verdicts) - 1)]
+        calls["n"] += 1
+        return CriticVerdict(approved=approved, reason=reason)
+
+    return _check
+
+
+def _never_check_critic(
+    conversation: list[Message], draft: str, context: PolicyContext
+) -> CriticVerdict:
+    raise AssertionError("critic_check_fn should never be called")
+
+
+def _build_gated_graph_with_critic(generate_fn: GenerateFn, critic_check_fn: CriticCheckFn):
+    return build_graph(
+        generate_fn,
+        policy_check_fn=_never_check_policy,
+        retriever=_StubRetriever([_A_CLAUSE]),
+        full_policy_text="FULL POLICY",
+        critic_check_fn=critic_check_fn,
+    )
+
+
+def test_critic_approves_draft_and_it_goes_out_unchanged() -> None:
+    app = _build_gated_graph_with_critic(
+        _stub_text("Here's your order status."), _stub_critic_check(approved=True)
+    )
+    state = AgentState(conversation=[Message(role="user", content="Where's my order?")])
+
+    result = run(app, state)
+
+    assert result.conversation[-1].content == "Here's your order status."
+    assert result.escalated is False
+    assert result.critic_feedback is None
+
+
+def test_critic_rejects_draft_triggers_one_revision_then_proceeds() -> None:
+    generate_fn = _stub_text_sequence(
+        ["Your refund was already sent.", "Let me look into that for you."]
+    )
+    critic_check_fn = _stub_critic_sequence([(False, "unsupported claim"), (True, "grounded now")])
+    app = _build_gated_graph_with_critic(generate_fn, critic_check_fn)
+    state = AgentState(conversation=[Message(role="user", content="Where's my refund?")])
+
+    result = run(app, state)
+
+    assert result.escalated is False
+    assert result.conversation[-1].content == "Let me look into that for you."
+    assert result.critic_feedback is None
+    # the rejected first draft never made it into history -- the user never saw it
+    assistant_contents = [m.content for m in result.conversation if m.role == "assistant"]
+    assert "Your refund was already sent." not in assistant_contents
+
+
+def test_critic_bounded_retry_escalates_after_exactly_one_revision() -> None:
+    """PLAN.md commit 20's literal acceptance check: the critic loop must
+    not exceed one revision, no matter how many times the critic rejects."""
+    call_count = {"n": 0}
+
+    def _always_draft(conversation: list[Message], tools: list[ToolDefinition]) -> AgentDecision:
+        call_count["n"] += 1
+        return AgentDecision(content=f"draft #{call_count['n']}")
+
+    def _always_reject(
+        conversation: list[Message], draft: str, context: PolicyContext
+    ) -> CriticVerdict:
+        return CriticVerdict(approved=False, reason="never good enough")
+
+    app = _build_gated_graph_with_critic(_always_draft, _always_reject)
+    state = AgentState(conversation=[Message(role="user", content="hi")])
+
+    result = run(app, state)
+
+    assert call_count["n"] == 2  # exactly one initial draft plus one bounded revision, never more
+    assert result.escalated is True
+    assert result.escalation_reason is not None
+    assert "critic" in result.escalation_reason
+    assert result.critic_feedback is None  # cleared even on the escalation path
+
+
+def test_revision_with_no_usable_text_escalates_without_a_second_critic_pass() -> None:
+    tool_call = ToolCall(id="call_1", name="get_order_details", arguments={"order_id": "1"})
+
+    def _text_then_tool_call(
+        conversation: list[Message], tools: list[ToolDefinition]
+    ) -> AgentDecision:
+        if any("Internal note" in (m.content or "") for m in conversation):
+            return AgentDecision(tool_call=tool_call)
+        return AgentDecision(content="Your refund was already sent.")
+
+    app = _build_gated_graph_with_critic(_text_then_tool_call, _stub_critic_check(approved=False))
+    state = AgentState(conversation=[Message(role="user", content="hi")])
+
+    result = run(app, state)
+
+    assert result.escalated is True
+    assert "not usable" in (result.escalation_reason or "")
+
+
+def test_tool_call_proposal_skips_critic_entirely() -> None:
+    tool_call = ToolCall(id="call_1", name="get_order_details", arguments={"order_id": "1"})
+    app = build_graph(
+        _stub_tool_call(tool_call),
+        policy_check_fn=_stub_policy_check("ALLOW"),
+        retriever=_StubRetriever([_A_CLAUSE]),
+        full_policy_text="FULL POLICY",
+        critic_check_fn=_never_check_critic,
+    )
+    state = AgentState(conversation=[Message(role="user", content="hi")])
+
+    result = run(app, state)
+
+    assert result.proposed_action is not None
+
+
+def test_empty_decision_escalation_skips_critic() -> None:
+    def _empty_decision(conversation: list[Message], tools: list[ToolDefinition]) -> AgentDecision:
+        return AgentDecision()
+
+    app = _build_gated_graph_with_critic(_empty_decision, _never_check_critic)
+    state = AgentState(conversation=[Message(role="user", content="hi")])
+
+    result = run(app, state)
+
+    assert result.escalated is True
+    assert result.escalation_reason == "agent produced neither a reply nor a tool call"
 
 
 @pytest.mark.skipif(
