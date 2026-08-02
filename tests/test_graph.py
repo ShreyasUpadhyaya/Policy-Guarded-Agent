@@ -7,7 +7,16 @@ import pytest
 
 from guarded_agent.config import BudgetConfig
 from guarded_agent.graph import AgentDecision, GenerateFn, build_graph, router, run
-from guarded_agent.state import AgentState, BudgetCounters, Message, ProposedAction, ToolCall
+from guarded_agent.guardrails.policy_checker import PolicyCheckFn
+from guarded_agent.guardrails.policy_retrieval import PolicyContext, RetrievedClause
+from guarded_agent.state import (
+    AgentState,
+    BudgetCounters,
+    Message,
+    PolicyVerdict,
+    ProposedAction,
+    ToolCall,
+)
 from guarded_agent.tools.registry import ToolDefinition
 
 MOCK_TASKS_PATH = (
@@ -94,6 +103,26 @@ def test_executor_path_dispatches_tool_and_increments_budget() -> None:
     assert result.budget.tool_calls_used == 1
 
 
+def test_executor_dispatch_is_idempotent_for_a_retried_identical_state() -> None:
+    """PLAN.md commit 17: a retried dispatch for the same (session_id, turn,
+    action_hash) returns the cached result rather than dispatching again."""
+    from guarded_agent.guardrails.write_gate import DispatchCache
+
+    cache = DispatchCache()
+    app = build_graph(_stub_text("Thanks, all set."), session_id="session-1", dispatch_cache=cache)
+    state = AgentState(
+        conversation=[Message(role="user", content="cancel it")],
+        proposed_action=ProposedAction(
+            id="call_1", tool_name="get_order_details", arguments={"order_id": "1"}
+        ),
+    )
+
+    run(app, state)
+    run(app, state)  # identical starting state -- same turn (budget.steps_used), same action
+
+    assert len(cache._cache) == 1
+
+
 def test_executor_path_records_unknown_tool_error_without_raising() -> None:
     app = build_graph(_stub_text("Sorry, something went wrong."))
     state = AgentState(
@@ -153,6 +182,141 @@ def test_kill_switch_takes_priority_over_a_pending_proposed_action() -> None:
     result = run(app, state)
 
     assert result.escalated is True
+
+
+class _StubRetriever:
+    """Duck-typed stand-in for PolicyRetriever -- avoids loading the real
+    embedding model in graph-wiring tests, which already have dedicated
+    coverage in test_policy_retrieval.py."""
+
+    def __init__(self, clauses: list[RetrievedClause]) -> None:
+        self._clauses = clauses
+
+    def retrieve(self, query: str, k: int) -> list[RetrievedClause]:
+        return self._clauses[:k]
+
+
+_A_CLAUSE = RetrievedClause(clause_id="c1", text="Some clause text.", score=0.9)
+
+
+def _stub_policy_check(
+    verdict: str, clause_id: str = "c1", reason: str = "because policy"
+) -> PolicyCheckFn:
+    def _check(action: ProposedAction, context: PolicyContext) -> PolicyVerdict:
+        return PolicyVerdict(verdict=verdict, clause_id=clause_id, reason=reason)  # type: ignore[arg-type]
+
+    return _check
+
+
+def _never_check_policy(action: ProposedAction, context: PolicyContext) -> PolicyVerdict:
+    raise AssertionError("policy_check_fn should never be called")
+
+
+def _build_gated_graph(generate_fn: GenerateFn, policy_check_fn: PolicyCheckFn):
+    return build_graph(
+        generate_fn,
+        policy_check_fn=policy_check_fn,
+        retriever=_StubRetriever([_A_CLAUSE]),
+        full_policy_text="FULL POLICY",
+    )
+
+
+def test_agent_text_reply_skips_policy_gate_entirely() -> None:
+    app = _build_gated_graph(_stub_text("Here's your info."), _never_check_policy)
+    state = AgentState(conversation=[Message(role="user", content="hi")])
+
+    result = run(app, state)
+
+    assert result.conversation[-1].content == "Here's your info."
+    assert result.policy_verdict is None
+
+
+def test_policy_gate_denies_invalid_schema_without_calling_policy_check_fn() -> None:
+    tool_call = ToolCall(id="call_1", name="get_order_details", arguments={})  # missing order_id
+    app = _build_gated_graph(_stub_tool_call(tool_call), _never_check_policy)
+    state = AgentState(conversation=[Message(role="user", content="hi")])
+
+    result = run(app, state)
+
+    assert result.proposed_action is None
+    assert result.conversation[-1].role == "assistant"
+    assert result.policy_verdict is None  # never reached the policy check
+
+
+def test_policy_gate_denies_based_on_policy_verdict() -> None:
+    tool_call = ToolCall(id="call_1", name="get_order_details", arguments={"order_id": "1"})
+    app = _build_gated_graph(
+        _stub_tool_call(tool_call), _stub_policy_check("DENY", reason="not allowed")
+    )
+    state = AgentState(conversation=[Message(role="user", content="hi")])
+
+    result = run(app, state)
+
+    assert result.proposed_action is None
+    assert result.policy_verdict is not None
+    assert result.policy_verdict.verdict == "DENY"
+    assert "not allowed" in (result.conversation[-1].content or "")
+
+
+def test_allowed_non_mutating_action_needs_no_confirmation() -> None:
+    tool_call = ToolCall(id="call_1", name="get_order_details", arguments={"order_id": "1"})
+    app = _build_gated_graph(_stub_tool_call(tool_call), _stub_policy_check("ALLOW"))
+    state = AgentState(conversation=[Message(role="user", content="hi")])
+
+    result = run(app, state)
+
+    assert result.proposed_action is not None  # ready to send, untouched by the write gate
+    assert result.pending_confirmation is None
+    assert result.policy_verdict is not None
+    assert result.policy_verdict.verdict == "ALLOW"
+
+
+def test_allowed_mutating_action_requires_confirmation() -> None:
+    tool_call = ToolCall(
+        id="call_1", name="issue_refund", arguments={"order_id": "1", "amount": 10.0}
+    )
+    app = _build_gated_graph(_stub_tool_call(tool_call), _stub_policy_check("ALLOW"))
+    state = AgentState(conversation=[Message(role="user", content="refund me")])
+
+    result = run(app, state)
+
+    assert result.proposed_action is None  # not sent out yet
+    assert result.pending_confirmation is not None
+    assert result.pending_confirmation.tool_name == "issue_refund"
+    assert "issue_refund" in (result.conversation[-1].content or "")
+
+
+def test_confirmation_lets_the_same_mutating_action_through() -> None:
+    tool_call = ToolCall(
+        id="call_2", name="issue_refund", arguments={"order_id": "1", "amount": 10.0}
+    )
+    app = _build_gated_graph(_stub_tool_call(tool_call), _stub_policy_check("ALLOW"))
+    state = AgentState(
+        conversation=[
+            Message(role="user", content="refund me"),
+            Message(role="assistant", content="Shall I proceed? (yes/no)"),
+            Message(role="user", content="yes"),
+        ],
+        pending_confirmation=ProposedAction(
+            id="call_1", tool_name="issue_refund", arguments={"order_id": "1", "amount": 10.0}
+        ),
+    )
+
+    result = run(app, state)
+
+    assert result.proposed_action is not None  # now ready to send
+    assert result.pending_confirmation is None
+
+
+def test_needs_confirmation_verdict_gates_even_a_non_mutating_tool() -> None:
+    tool_call = ToolCall(id="call_1", name="get_order_details", arguments={"order_id": "1"})
+    app = _build_gated_graph(_stub_tool_call(tool_call), _stub_policy_check("NEEDS_CONFIRMATION"))
+    state = AgentState(conversation=[Message(role="user", content="hi")])
+
+    result = run(app, state)
+
+    assert result.proposed_action is None
+    assert result.pending_confirmation is not None
 
 
 @pytest.mark.skipif(

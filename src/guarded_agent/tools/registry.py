@@ -47,24 +47,30 @@ class ToolRegistry:
         cls,
         schemas: list[dict[str, Any]],
         *,
-        mutating: bool = True,
+        mutating_by_name: dict[str, bool] | None = None,
+        default_mutating: bool = True,
         risk_tier: Literal["low", "medium", "high"] = "high",
     ) -> ToolRegistry:
         """Build a registry from OpenAI-style function-calling schemas.
 
         Used for domains (e.g. a tau2 benchmark run) whose real tools aren't
-        known ahead of time and so can't live in registry.yaml. `mutating`
-        and `risk_tier` default to the conservative case (True/"high") since
-        this format carries no read/write classification of its own --
-        fail-safe forcing, per CLAUDE.md, rather than assuming a tool is safe.
+        known ahead of time and so can't live in registry.yaml. `schemas`
+        alone carry no read/write classification -- pass `mutating_by_name`
+        when the caller has real per-tool classification available (e.g. the
+        tau2 adapter reads it off each Tool's underlying function). Any name
+        not in `mutating_by_name` falls back to `default_mutating` (True by
+        default: fail-safe forcing, per CLAUDE.md, rather than assuming a
+        tool not otherwise classified is safe).
         """
+        mutating_by_name = mutating_by_name or {}
         tools = {}
         for schema in schemas:
             function = schema["function"]
-            tools[function["name"]] = ToolDefinition(
-                name=function["name"],
+            name = function["name"]
+            tools[name] = ToolDefinition(
+                name=name,
                 description=function.get("description", ""),
-                mutating=mutating,
+                mutating=mutating_by_name.get(name, default_mutating),
                 risk_tier=risk_tier,
                 parameters=function.get("parameters", {"type": "object", "properties": {}}),
             )

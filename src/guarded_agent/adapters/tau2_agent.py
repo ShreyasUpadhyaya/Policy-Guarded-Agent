@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+import uuid
+from functools import lru_cache
 from typing import Any
 
 from tau2.agent.base.llm_config import LLMConfigMixin
@@ -18,7 +20,10 @@ from tau2.utils.llm_utils import generate as tau2_generate
 from guarded_agent.config import load_config
 from guarded_agent.graph import AgentDecision, GenerateFn, build_graph
 from guarded_agent.graph import run as run_graph
+from guarded_agent.guardrails.policy_checker import make_llm_policy_check_fn
+from guarded_agent.guardrails.policy_retrieval import PolicyRetriever
 from guarded_agent.state import AgentState, Message, ToolCall
+from guarded_agent.telemetry.tracing import configure_tracing
 from guarded_agent.tools.registry import ToolDefinition, ToolRegistry
 
 AGENT_NAME = "guarded_agent"
@@ -86,6 +91,31 @@ def _to_tau2_messages(conversation: list[Message], system_prompt: str) -> list[T
                 Tau2ToolMessage(id=message.tool_call_id or "", role="tool", content=message.content)
             )
     return tau2_messages
+
+
+@lru_cache(maxsize=8)
+def _cached_retriever(domain_policy: str) -> PolicyRetriever:
+    """Building a PolicyRetriever loads the embedding model and indexes the
+    policy text (~1-2s). tau2 constructs a fresh GuardedTau2Agent per task,
+    but every task in a domain shares the same domain_policy string, so
+    caching by that text avoids rebuilding the same index for every task in
+    a run. maxsize=8 is enough headroom for every tau2 domain at once
+    without the cache growing unbounded across a long process lifetime.
+    """
+    return PolicyRetriever.from_policy_text(domain_policy)
+
+
+def _extract_mutating_by_name(tools: list[Tau2Tool]) -> dict[str, bool]:
+    """Read each tool's real read/write classification off its underlying
+    function, set by tau2's own `@is_tool(ToolType.WRITE)` decorator.
+
+    Not part of tau2's advertised public API -- `Tool._func` is a private
+    attribute -- but stable for our purposes since tau2 is pinned to an
+    exact tag (v1.0.1). Falls back to treating a tool as mutating if the
+    attribute is somehow missing: fail-safe forcing, same as
+    ToolRegistry.from_openai_schemas's own default.
+    """
+    return {tool.name: getattr(tool._func, "__mutates_state__", True) for tool in tools}
 
 
 class LastGeneration:
@@ -166,14 +196,28 @@ class GuardedTau2Agent(LLMConfigMixin, HalfDuplexAgent[AgentState]):  # type: ig
         llm: str,
         llm_args: dict[str, Any] | None = None,
     ) -> None:
+        configure_tracing()
         super().__init__(tools=tools, domain_policy=domain_policy, llm=llm, llm_args=llm_args)
-        registry = ToolRegistry.from_openai_schemas([t.openai_schema for t in tools])
+        registry = ToolRegistry.from_openai_schemas(
+            [t.openai_schema for t in tools],
+            mutating_by_name=_extract_mutating_by_name(tools),
+        )
         self._last_generation = LastGeneration()
         generate_fn = make_tau2_generate_fn(
             tools, llm, self.llm_args, domain_policy, self._last_generation
         )
-        budget_limits = load_config().budget
-        self.app = build_graph(generate_fn, registry, budget_limits)
+        run_config = load_config()
+        self.app = build_graph(
+            generate_fn,
+            registry,
+            run_config.budget,
+            policy_check_fn=make_llm_policy_check_fn(llm),
+            retriever=_cached_retriever(domain_policy),
+            full_policy_text=domain_policy,
+            retrieval_top_k=run_config.retrieval.top_k,
+            retrieval_min_confidence=run_config.retrieval.min_confidence,
+            session_id=str(uuid.uuid4()),
+        )
         self._started_at = time.time()
 
     def get_init_state(self, message_history: list[Tau2Message] | None = None) -> AgentState:

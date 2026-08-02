@@ -88,3 +88,64 @@ def test_unknown_tool_rejected_without_calling_handler(registry: ToolRegistry) -
     assert result.ok is False
     assert result.error is not None
     assert result.error.error_type == "unknown_tool"
+
+
+SAMPLE_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_order_details",
+            "description": "Look up an order.",
+            "parameters": {
+                "type": "object",
+                "properties": {"order_id": {"type": "string"}},
+                "required": ["order_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_pending_order",
+            "description": "Cancel an order.",
+            "parameters": {
+                "type": "object",
+                "properties": {"order_id": {"type": "string"}},
+                "required": ["order_id"],
+            },
+        },
+    },
+]
+
+
+def test_from_openai_schemas_uses_real_mutating_status_when_given() -> None:
+    registry = ToolRegistry.from_openai_schemas(
+        SAMPLE_SCHEMAS,
+        mutating_by_name={"get_order_details": False, "cancel_pending_order": True},
+    )
+
+    read_tool = registry.get("get_order_details")
+    write_tool = registry.get("cancel_pending_order")
+
+    assert read_tool is not None
+    assert read_tool.mutating is False
+    assert write_tool is not None
+    assert write_tool.mutating is True
+
+
+def test_from_openai_schemas_falls_back_to_default_mutating_for_unclassified_tools() -> None:
+    registry = ToolRegistry.from_openai_schemas(
+        SAMPLE_SCHEMAS, mutating_by_name={"get_order_details": False}
+    )
+
+    unclassified = registry.get("cancel_pending_order")
+
+    assert unclassified is not None
+    assert unclassified.mutating is True  # default_mutating=True: fail-safe forcing
+
+
+def test_from_openai_schemas_defaults_everything_mutating_without_classification() -> None:
+    registry = ToolRegistry.from_openai_schemas(SAMPLE_SCHEMAS)
+
+    assert registry.get("get_order_details").mutating is True  # type: ignore[union-attr]
+    assert registry.get("cancel_pending_order").mutating is True  # type: ignore[union-attr]

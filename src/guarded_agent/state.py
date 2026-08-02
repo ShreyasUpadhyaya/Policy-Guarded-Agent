@@ -65,6 +65,10 @@ class AgentState(BaseModel):
     plan: str | None = None
     proposed_action: ProposedAction | None = None
     policy_verdict: PolicyVerdict | None = None
+    pending_confirmation: ProposedAction | None = None
+    """A mutating action the write gate already presented for confirmation,
+    awaiting the user's explicit yes/no before it can be proposed again and
+    let through."""
     budget: BudgetCounters = Field(default_factory=BudgetCounters)
     escalated: bool = False
     escalation_reason: str | None = None

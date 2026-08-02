@@ -23,15 +23,15 @@ def _slugify(*parts: str) -> str:
     return slug
 
 
-def load_policy_clauses(policy_path: Path) -> list[Document]:
-    """Split a domain policy.md into clause-level Documents by markdown header.
+def split_policy_text(text: str) -> list[Document]:
+    """Split raw policy markdown into clause-level Documents by header.
 
     Each Document's metadata gets a stable `clause_id` derived from its
     section/subsection headers (e.g. "return-delivered-order"), used later
     to cite the exact clause a policy verdict is based on (commit 16).
     """
     splitter = MarkdownHeaderTextSplitter(headers_to_split_on=_HEADERS_TO_SPLIT_ON)
-    documents = splitter.split_text(policy_path.read_text(encoding="utf-8"))
+    documents = splitter.split_text(text)
 
     seen_ids: dict[str, int] = {}
     for index, document in enumerate(documents):
@@ -45,6 +45,12 @@ def load_policy_clauses(policy_path: Path) -> list[Document]:
             seen_ids[clause_id] = 0
         document.metadata["clause_id"] = clause_id
     return documents
+
+
+def load_policy_clauses(policy_path: Path) -> list[Document]:
+    """Split a domain policy.md file into clause-level Documents. See
+    split_policy_text for the actual splitting logic."""
+    return split_policy_text(policy_path.read_text(encoding="utf-8"))
 
 
 class RetrievedClause(BaseModel):
@@ -81,6 +87,15 @@ class PolicyRetriever:
         cls, policy_path: Path, embedding_model: str = DEFAULT_EMBEDDING_MODEL
     ) -> PolicyRetriever:
         return cls(load_policy_clauses(policy_path), embedding_model=embedding_model)
+
+    @classmethod
+    def from_policy_text(
+        cls, text: str, embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    ) -> PolicyRetriever:
+        """For callers that already have the policy text in hand (e.g. the
+        tau2 adapter, which receives domain_policy as a string tau2 itself
+        already read from disk) rather than a file path."""
+        return cls(split_policy_text(text), embedding_model=embedding_model)
 
     def retrieve(self, query: str, k: int) -> list[RetrievedClause]:
         # FAISS's default relevance-score normalization assumes a distance/
