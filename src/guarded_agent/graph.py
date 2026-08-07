@@ -134,10 +134,17 @@ def after_critic_router(state: AgentState) -> Literal["agent_revise", "end"]:
     return "agent_revise" if state.critic_feedback is not None else "end"
 
 
-def after_agent_revise_router(state: AgentState) -> Literal["critic_final", "end"]:
-    """agent_revise escalates directly (and ends the turn there) if the
-    revision itself wasn't usable text -- nothing left to review. Otherwise
-    the revised draft gets exactly one more critic pass."""
+def after_agent_revise_router(state: AgentState) -> Literal["policy_gate", "critic_final", "end"]:
+    """A revision that proposes a tool call instead of text is a legitimate
+    outcome, not a failure -- the critic rejecting an ungrounded claim is
+    exactly what should push the model toward looking the answer up instead
+    of asserting it, and that call still has to clear policy_gate/write_gate
+    like any other proposed action. agent_revise escalates directly (ending
+    the turn there) only if the revision produced neither text nor a tool
+    call -- nothing usable to route anywhere. Otherwise the revised text
+    draft gets exactly one more critic pass."""
+    if state.proposed_action is not None:
+        return "policy_gate"
     return "end" if state.escalated else "critic_final"
 
 
@@ -481,10 +488,18 @@ def make_agent_revise_node(
     regeneration call -- then always clears critic_feedback, so nothing
     about this pass can linger into a state a future turn might see.
 
-    A revision that still isn't usable plain text (empty, or a tool call --
-    the critic asked for a corrected reply, not a change of plan) escalates
-    immediately rather than looping again: the same fail-safe-forcing rule
-    make_agent_node applies to an empty first-pass decision.
+    A revision that proposes a tool call is a legitimate outcome, not a
+    failure: the critic rejecting an ungrounded claim is exactly what
+    should push the model toward looking the answer up instead of
+    asserting it (verified live -- an earlier version of this node treated
+    any tool call here as unusable and escalated immediately, which turned
+    out to tank a live smoke run's Pass^1 to 0.000 by escalating on
+    completely ordinary "let me check that" recoveries). That call still
+    goes through policy_gate/write_gate like any other proposed action (see
+    after_agent_revise_router). Only a decision with neither text nor a
+    tool call -- nothing usable at all -- escalates immediately, the same
+    fail-safe-forcing rule make_agent_node applies to an empty first-pass
+    decision.
     """
 
     def agent_revise(state: AgentState) -> dict[str, Any]:
@@ -498,7 +513,20 @@ def make_agent_revise_node(
             steps=1, tokens=decision.prompt_tokens + decision.completion_tokens
         )
 
-        if not decision.content or decision.tool_call is not None:
+        if decision.tool_call is not None:
+            updated = state.add_message(Message(role="assistant", tool_calls=[decision.tool_call]))
+            return {
+                "conversation": updated.conversation,
+                "proposed_action": ProposedAction(
+                    id=decision.tool_call.id,
+                    tool_name=decision.tool_call.name,
+                    arguments=decision.tool_call.arguments,
+                ),
+                "budget": budget,
+                "critic_feedback": None,
+            }
+
+        if not decision.content:
             escalated = state.escalate("revised response was not usable after one critic revision")
             escalated = escalated.add_message(
                 Message(
@@ -610,7 +638,7 @@ def build_graph(
             graph.add_conditional_edges(
                 "agent_revise",
                 after_agent_revise_router,
-                {"critic_final": "critic_final", "end": END},
+                {"policy_gate": "policy_gate", "critic_final": "critic_final", "end": END},
             )
 
             graph.add_node("critic_final", traced_node("critic_final", critic_node_fn))  # type: ignore[call-overload]

@@ -488,10 +488,14 @@ def _never_check_critic(
     raise AssertionError("critic_check_fn should never be called")
 
 
-def _build_gated_graph_with_critic(generate_fn: GenerateFn, critic_check_fn: CriticCheckFn):
+def _build_gated_graph_with_critic(
+    generate_fn: GenerateFn,
+    critic_check_fn: CriticCheckFn,
+    policy_check_fn: PolicyCheckFn = _never_check_policy,
+):
     return build_graph(
         generate_fn,
-        policy_check_fn=_never_check_policy,
+        policy_check_fn=policy_check_fn,
         retriever=_StubRetriever([_A_CLAUSE]),
         full_policy_text="FULL POLICY",
         critic_check_fn=critic_check_fn,
@@ -556,6 +560,27 @@ def test_critic_bounded_retry_escalates_after_exactly_one_revision() -> None:
 
 
 def test_revision_with_no_usable_text_escalates_without_a_second_critic_pass() -> None:
+    def _draft_then_empty(
+        conversation: list[Message], tools: list[ToolDefinition]
+    ) -> AgentDecision:
+        if any("Internal note" in (m.content or "") for m in conversation):
+            return AgentDecision()
+        return AgentDecision(content="Your refund was already sent.")
+
+    app = _build_gated_graph_with_critic(_draft_then_empty, _stub_critic_check(approved=False))
+    state = AgentState(conversation=[Message(role="user", content="hi")])
+
+    result = run(app, state)
+
+    assert result.escalated is True
+    assert "not usable" in (result.escalation_reason or "")
+
+
+def test_revision_that_proposes_a_tool_call_goes_through_policy_gate_not_escalation() -> None:
+    """A revision choosing to look something up instead of asserting it is a
+    legitimate outcome, not a failure -- verified live: an earlier version
+    of agent_revise escalated on exactly this, which tanked a real smoke
+    run's Pass^1 to 0.000 by escalating on ordinary "let me check" recoveries."""
     tool_call = ToolCall(id="call_1", name="get_order_details", arguments={"order_id": "1"})
 
     def _text_then_tool_call(
@@ -565,13 +590,20 @@ def test_revision_with_no_usable_text_escalates_without_a_second_critic_pass() -
             return AgentDecision(tool_call=tool_call)
         return AgentDecision(content="Your refund was already sent.")
 
-    app = _build_gated_graph_with_critic(_text_then_tool_call, _stub_critic_check(approved=False))
+    app = _build_gated_graph_with_critic(
+        _text_then_tool_call,
+        _stub_critic_check(approved=False, reason="unsupported claim"),
+        policy_check_fn=_stub_policy_check("ALLOW"),
+    )
     state = AgentState(conversation=[Message(role="user", content="hi")])
 
     result = run(app, state)
 
-    assert result.escalated is True
-    assert "not usable" in (result.escalation_reason or "")
+    assert result.escalated is False
+    assert result.proposed_action == ProposedAction(
+        id="call_1", tool_name="get_order_details", arguments={"order_id": "1"}
+    )
+    assert result.critic_feedback is None
 
 
 def test_tool_call_proposal_skips_critic_entirely() -> None:
