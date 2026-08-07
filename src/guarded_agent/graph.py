@@ -348,6 +348,24 @@ def _build_retrieval_query(action: ProposedAction) -> str:
     return f"{action.tool_name} {json.dumps(action.arguments, sort_keys=True)}"
 
 
+def _reject_proposal(state: AgentState, explanation: str) -> AgentState:
+    """Replace a just-proposed, never-sent, never-executed tool-call message
+    with a plain-text explanation.
+
+    The proposal must be removed, not just left alongside the explanation --
+    verified live during commit 21's v2 smoke run: leaving it produced a
+    tool_use block with no following tool_result (tau2 never dispatches a
+    call the gate rejected), and Anthropic rejects the *next* LLM call
+    outright for it ("tool_use ids were found without tool_result blocks").
+    Every node that can reject an already-proposed action -- policy_gate's
+    schema/DENY branches, write_gate's not-yet-confirmed branch -- must call
+    this instead of state.add_message so the rejected proposal never lingers
+    in history as if it had gone out for real.
+    """
+    popped = state.model_copy(update={"conversation": state.conversation[:-1]})
+    return popped.add_message(Message(role="assistant", content=explanation))
+
+
 def make_policy_gate_node(
     registry: ToolRegistry,
     retriever: PolicyRetriever,
@@ -373,7 +391,7 @@ def make_policy_gate_node(
         validation = registry.dispatch(action.tool_name, action.arguments, lambda _args: None)
         if not validation.ok:
             message = validation.error.message if validation.error else "invalid tool call"
-            updated = state.add_message(Message(role="assistant", content=message))
+            updated = _reject_proposal(state, message)
             return {"conversation": updated.conversation, "proposed_action": None}
 
         query = _build_retrieval_query(action)
@@ -381,9 +399,7 @@ def make_policy_gate_node(
         verdict = check_policy(action, context, policy_check_fn)
 
         if verdict.verdict == "DENY":
-            updated = state.add_message(
-                Message(role="assistant", content=f"I can't do that: {verdict.reason}")
-            )
+            updated = _reject_proposal(state, f"I can't do that: {verdict.reason}")
             return {
                 "conversation": updated.conversation,
                 "proposed_action": None,
@@ -427,7 +443,8 @@ def make_write_gate_node(registry: ToolRegistry) -> Callable[[AgentState], dict[
         if gate_verdict.confirmed:
             return {"pending_confirmation": None}
 
-        updated = state.add_message(Message(role="assistant", content=gate_verdict.prompt_message))
+        assert gate_verdict.prompt_message is not None  # always set when confirmed=False
+        updated = _reject_proposal(state, gate_verdict.prompt_message)
         return {
             "conversation": updated.conversation,
             "proposed_action": None,

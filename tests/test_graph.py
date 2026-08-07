@@ -384,6 +384,11 @@ def test_policy_gate_denies_invalid_schema_without_calling_policy_check_fn() -> 
     assert result.proposed_action is None
     assert result.conversation[-1].role == "assistant"
     assert result.policy_verdict is None  # never reached the policy check
+    # the rejected tool-call proposal must not linger in history -- tau2 never
+    # dispatches it, so an orphaned tool_use block would break the next real
+    # Anthropic call (verified live, PLAN.md commit 21 v2 smoke run)
+    assert [m.role for m in result.conversation] == ["user", "assistant"]
+    assert not any(m.tool_calls for m in result.conversation)
 
 
 def test_policy_gate_denies_based_on_policy_verdict() -> None:
@@ -399,6 +404,8 @@ def test_policy_gate_denies_based_on_policy_verdict() -> None:
     assert result.policy_verdict is not None
     assert result.policy_verdict.verdict == "DENY"
     assert "not allowed" in (result.conversation[-1].content or "")
+    assert [m.role for m in result.conversation] == ["user", "assistant"]
+    assert not any(m.tool_calls for m in result.conversation)
 
 
 def test_allowed_non_mutating_action_needs_no_confirmation() -> None:
@@ -427,6 +434,8 @@ def test_allowed_mutating_action_requires_confirmation() -> None:
     assert result.pending_confirmation is not None
     assert result.pending_confirmation.tool_name == "issue_refund"
     assert "issue_refund" in (result.conversation[-1].content or "")
+    assert [m.role for m in result.conversation] == ["user", "assistant"]
+    assert not any(m.tool_calls for m in result.conversation)
 
 
 def test_confirmation_lets_the_same_mutating_action_through() -> None:
@@ -460,6 +469,7 @@ def test_needs_confirmation_verdict_gates_even_a_non_mutating_tool() -> None:
 
     assert result.proposed_action is None
     assert result.pending_confirmation is not None
+    assert not any(m.tool_calls for m in result.conversation)
 
 
 def _stub_critic_check(approved: bool, reason: str = "because critic") -> CriticCheckFn:
