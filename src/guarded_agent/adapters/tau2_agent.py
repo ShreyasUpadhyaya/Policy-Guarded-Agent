@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 
@@ -22,12 +23,20 @@ from guarded_agent.graph import AgentDecision, GenerateFn, build_graph
 from guarded_agent.graph import run as run_graph
 from guarded_agent.guardrails.critic import make_llm_critic_check_fn
 from guarded_agent.guardrails.policy_checker import make_llm_policy_check_fn
-from guarded_agent.guardrails.policy_retrieval import PolicyRetriever
-from guarded_agent.state import AgentState, Message, ToolCall
+from guarded_agent.guardrails.policy_retrieval import PolicyContext, PolicyRetriever
+from guarded_agent.state import AgentState, Message, PolicyVerdict, ProposedAction, ToolCall
 from guarded_agent.telemetry.tracing import configure_tracing
 from guarded_agent.tools.registry import ToolDefinition, ToolRegistry
 
 AGENT_NAME = "guarded_agent"
+
+GUARDRAIL_STAGES = ("registry", "policy_checker", "critic")
+"""Cumulative ablation stages (PLAN.md commit 23's five variants: baseline,
++registry, +policy_checker, +critic, full). Budget enforcement and
+escalation are deliberately not one of these -- they're safety
+infrastructure that predates Day 3's guardrails (commit 12's kill switch),
+not a guardrail feature the ablation study is measuring, so every variant
+including baseline keeps them."""
 
 AGENT_INSTRUCTION = """
 You are a customer service agent that helps the user according to the <policy> provided below.
@@ -200,6 +209,7 @@ class GuardedTau2Agent(LLMConfigMixin, HalfDuplexAgent[AgentState]):  # type: ig
         domain_policy: str,
         llm: str,
         llm_args: dict[str, Any] | None = None,
+        enabled_guardrails: frozenset[str] = frozenset(GUARDRAIL_STAGES),
     ) -> None:
         configure_tracing()
         super().__init__(tools=tools, domain_policy=domain_policy, llm=llm, llm_args=llm_args)
@@ -212,19 +222,29 @@ class GuardedTau2Agent(LLMConfigMixin, HalfDuplexAgent[AgentState]):  # type: ig
             tools, llm, self.llm_args, domain_policy, self._last_generation
         )
         run_config = load_config()
+
+        graph_kwargs: dict[str, Any] = {}
+        if "registry" in enabled_guardrails:
+            graph_kwargs["policy_check_fn"] = (
+                make_llm_policy_check_fn(llm)
+                if "policy_checker" in enabled_guardrails
+                else _always_allow_policy_check
+            )
+            graph_kwargs["retriever"] = _cached_retriever(domain_policy)
+            graph_kwargs["full_policy_text"] = domain_policy
+            graph_kwargs["retrieval_top_k"] = run_config.retrieval.top_k
+            graph_kwargs["retrieval_min_confidence"] = run_config.retrieval.min_confidence
+            if "critic" in enabled_guardrails:
+                graph_kwargs["critic_check_fn"] = make_llm_critic_check_fn(llm)
+
         self.app = build_graph(
             generate_fn,
             registry,
             run_config.budget,
-            policy_check_fn=make_llm_policy_check_fn(llm),
-            retriever=_cached_retriever(domain_policy),
-            full_policy_text=domain_policy,
-            retrieval_top_k=run_config.retrieval.top_k,
-            retrieval_min_confidence=run_config.retrieval.min_confidence,
-            critic_check_fn=make_llm_critic_check_fn(llm),
             session_id=str(uuid.uuid4()),
             max_consecutive_tool_failures=run_config.escalation.max_consecutive_tool_failures,
             max_consecutive_policy_denials=run_config.escalation.max_consecutive_policy_denials,
+            **graph_kwargs,
         )
         self._started_at = time.time()
 
@@ -288,10 +308,33 @@ class GuardedTau2Agent(LLMConfigMixin, HalfDuplexAgent[AgentState]):  # type: ig
         return assistant_message, state
 
 
+def _always_allow_policy_check(
+    conversation: list[Message], action: ProposedAction, context: PolicyContext
+) -> PolicyVerdict:
+    """Ablation-only stand-in for a real policy checker (PLAN.md commit 23's
+    '+registry' variant): schema validation and write_gate's real
+    mutating-based confirmation still run for real, but nothing here makes
+    an actual LLM-based policy compliance judgment yet. Never used by the
+    default/production agent -- only by the '+registry' ablation factory,
+    which explicitly asks for it via enabled_guardrails.
+    """
+    return PolicyVerdict(
+        verdict="ALLOW",
+        clause_id="ablation-stub",
+        reason="policy checker disabled for this ablation variant",
+    )
+
+
 def create_guarded_agent(
     tools: list[Tau2Tool], domain_policy: str, **kwargs: Any
 ) -> GuardedTau2Agent:
-    """Factory function, matching tau2's `factory(tools, domain_policy, **kwargs)` pattern."""
+    """Factory function, matching tau2's `factory(tools, domain_policy, **kwargs)` pattern.
+
+    Always builds the "full" variant (every guardrail enabled) -- this is
+    the production/default agent, registered under AGENT_NAME, and its
+    behavior must stay exactly what every prior commit already verified.
+    See _make_ablation_agent_factory for the other four ablation variants.
+    """
     llm = kwargs.get("llm")
     if llm is None:
         raise ValueError("create_guarded_agent requires 'llm' (pass --agent-llm on the CLI)")
@@ -303,15 +346,59 @@ def create_guarded_agent(
     )
 
 
+def _make_ablation_agent_factory(
+    enabled_guardrails: frozenset[str],
+) -> Callable[..., GuardedTau2Agent]:
+    """Build a tau2 agent factory pinned to a fixed set of enabled
+    guardrails (PLAN.md commit 23).
+
+    tau2's own agent-construction call (tau2/runner/build.py) only ever
+    passes a fixed set of kwargs (llm, llm_args, task, ...) to whichever
+    factory is registered under the name evals/ablations.yaml's `agent`
+    field selects -- there's no channel to pass "which guardrails" through
+    that call. So each ablation variant gets its own registered factory
+    name instead, with enabled_guardrails baked in via this closure, rather
+    than smuggled through llm_args.
+    """
+
+    def factory(tools: list[Tau2Tool], domain_policy: str, **kwargs: Any) -> GuardedTau2Agent:
+        llm = kwargs.get("llm")
+        if llm is None:
+            raise ValueError("this agent factory requires 'llm' (pass --agent-llm on the CLI)")
+        return GuardedTau2Agent(
+            tools=tools,
+            domain_policy=domain_policy,
+            llm=llm,
+            llm_args=kwargs.get("llm_args"),
+            enabled_guardrails=enabled_guardrails,
+        )
+
+    return factory
+
+
+ABLATION_AGENT_VARIANTS: dict[str, frozenset[str]] = {
+    "guarded_agent_baseline": frozenset(),
+    "guarded_agent_registry": frozenset({"registry"}),
+    "guarded_agent_policy_checker": frozenset({"registry", "policy_checker"}),
+    "guarded_agent_critic": frozenset({"registry", "policy_checker", "critic"}),
+}
+"""The four ablation stages short of "full" (PLAN.md commit 23). "full"
+itself is AGENT_NAME ("guarded_agent") -- the existing, unchanged default
+factory -- since there's no fifth guardrail left to add on top of critic."""
+
+
 def register() -> None:
-    """Register our agent factory with tau2's registry.
+    """Register our agent factories with tau2's registry.
 
     Safe to call more than once (e.g. if this module is imported from
     multiple entry points) -- tau2_registry.register_agent_factory raises on
-    a duplicate name, so this guards against that.
+    a duplicate name, so each registration is guarded individually.
     """
     if tau2_registry.get_agent_factory(AGENT_NAME) is None:
         tau2_registry.register_agent_factory(create_guarded_agent, AGENT_NAME)
+    for name, enabled in ABLATION_AGENT_VARIANTS.items():
+        if tau2_registry.get_agent_factory(name) is None:
+            tau2_registry.register_agent_factory(_make_ablation_agent_factory(enabled), name)
 
 
 register()

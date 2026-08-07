@@ -1,0 +1,67 @@
+# PLAN.md commit 23: five variants for the Day 4 FULL ablation run (commit 24).
+#
+# Cumulative: each variant enables everything the previous one did, plus one
+# more guardrail. "full" has no extra guardrail beyond "+critic" in the
+# current build -- it maps to the unchanged, already-shipped default agent
+# (`guarded_agent`) rather than a fifth registered ablation factory. See
+# adapters/tau2_agent.py's GUARDRAIL_STAGES/ABLATION_AGENT_VARIANTS for the
+# registered agent names each variant selects.
+#
+# num_tasks=40 (of 114 available) matches PLAN.md commit 24's proposal: a
+# capped subset, not the full retail task set, kept identical across all
+# five variants for a fair comparison. tau2's own task loading takes a
+# stable first-N slice of the task list (not seed-sampled), so num_tasks=40
+# alone is enough for that consistency -- no explicit task_ids needed.
+#
+# num_trials=4 so Pass^4 (not just Pass^1) is measurable per PLAN.md commit
+# 24's acceptance check ("Pass^1 and Pass^4 per variant").
+#
+# This file is NOT run by commit 23 -- only enumerated via
+# `run_suite.py --dry-run`. The real run is commit 24, gated on explicit
+# budget approval per CLAUDE.md rule 1.
+
+variants:
+  - name: baseline
+    agent: guarded_agent_baseline
+    domain: retail
+    llm_agent: anthropic/claude-haiku-4-5-20251001
+    llm_user: anthropic/claude-haiku-4-5-20251001
+    num_tasks: 40
+    num_trials: 4
+    seed: 300
+
+  - name: "+registry"
+    agent: guarded_agent_registry
+    domain: retail
+    llm_agent: anthropic/claude-haiku-4-5-20251001
+    llm_user: anthropic/claude-haiku-4-5-20251001
+    num_tasks: 40
+    num_trials: 4
+    seed: 300
+
+  - name: "+policy_checker"
+    agent: guarded_agent_policy_checker
+    domain: retail
+    llm_agent: anthropic/claude-haiku-4-5-20251001
+    llm_user: anthropic/claude-haiku-4-5-20251001
+    num_tasks: 40
+    num_trials: 4
+    seed: 300
+
+  - name: "+critic"
+    agent: guarded_agent_critic
+    domain: retail
+    llm_agent: anthropic/claude-haiku-4-5-20251001
+    llm_user: anthropic/claude-haiku-4-5-20251001
+    num_tasks: 40
+    num_trials: 4
+    seed: 300
+
+  - name: full
+    agent: guarded_agent
+    domain: retail
+    llm_agent: anthropic/claude-haiku-4-5-20251001
+    llm_user: anthropic/claude-haiku-4-5-20251001
+    num_tasks: 40
+    num_trials: 4
+    seed: 300
