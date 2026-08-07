@@ -12,7 +12,7 @@ from guarded_agent.guardrails.policy_checker import (
     make_llm_policy_check_fn,
 )
 from guarded_agent.guardrails.policy_retrieval import PolicyContext, RetrievedClause
-from guarded_agent.state import ProposedAction
+from guarded_agent.state import Message, ProposedAction
 
 CONFIDENT_CONTEXT = PolicyContext(
     clauses=[
@@ -38,6 +38,11 @@ FALLBACK_CONTEXT = PolicyContext(
 ACTION = ProposedAction(
     id="call_1", tool_name="issue_refund", arguments={"order_id": "123", "amount": 42.0}
 )
+
+CONVERSATION = [
+    Message(role="user", content="Where's my order?"),
+    Message(role="tool", content="status: shipped"),
+]
 
 
 def _fake_completion_response(content: str | None) -> MagicMock:
@@ -67,10 +72,16 @@ def test_format_clauses_uses_full_text_on_fallback() -> None:
 
 
 def test_build_user_prompt_includes_action_name_and_arguments() -> None:
-    prompt = _build_user_prompt(ACTION, CONFIDENT_CONTEXT)
+    prompt = _build_user_prompt(CONVERSATION, ACTION, CONFIDENT_CONTEXT)
     assert "issue_refund" in prompt
     assert "123" in prompt
     assert "return-delivered-order" in prompt
+
+
+def test_build_user_prompt_includes_conversation_history() -> None:
+    prompt = _build_user_prompt(CONVERSATION, ACTION, CONFIDENT_CONTEXT)
+    assert "Where's my order?" in prompt
+    assert "status: shipped" in prompt
 
 
 # --- JSON extraction robustness ---------------------------------------------
@@ -105,7 +116,7 @@ def test_llm_policy_check_fn_parses_clean_json(monkeypatch: pytest.MonkeyPatch) 
     )
     check_fn = make_llm_policy_check_fn("fake-model")
 
-    verdict = check_fn(ACTION, CONFIDENT_CONTEXT)
+    verdict = check_fn(CONVERSATION, ACTION, CONFIDENT_CONTEXT)
 
     assert verdict.verdict == "ALLOW"
     assert verdict.clause_id == "return-delivered-order"
@@ -123,7 +134,7 @@ def test_llm_policy_check_fn_handles_markdown_fenced_response(
     )
     check_fn = make_llm_policy_check_fn("fake-model")
 
-    verdict = check_fn(ACTION, CONFIDENT_CONTEXT)
+    verdict = check_fn(CONVERSATION, ACTION, CONFIDENT_CONTEXT)
 
     assert verdict.verdict == "DENY"
 
@@ -137,7 +148,7 @@ def test_llm_policy_check_fn_fails_closed_on_unparseable_response(
     )
     check_fn = make_llm_policy_check_fn("fake-model")
 
-    verdict = check_fn(ACTION, CONFIDENT_CONTEXT)
+    verdict = check_fn(CONVERSATION, ACTION, CONFIDENT_CONTEXT)
 
     assert verdict.verdict == "DENY"
     assert "did not parse" in verdict.reason
@@ -154,7 +165,7 @@ def test_llm_policy_check_fn_fails_closed_on_invalid_verdict_value(
     )
     check_fn = make_llm_policy_check_fn("fake-model")
 
-    verdict = check_fn(ACTION, CONFIDENT_CONTEXT)
+    verdict = check_fn(CONVERSATION, ACTION, CONFIDENT_CONTEXT)
 
     assert verdict.verdict == "DENY"
 
@@ -166,7 +177,7 @@ def test_llm_policy_check_fn_fails_closed_on_empty_content(monkeypatch: pytest.M
     )
     check_fn = make_llm_policy_check_fn("fake-model")
 
-    verdict = check_fn(ACTION, CONFIDENT_CONTEXT)
+    verdict = check_fn(CONVERSATION, ACTION, CONFIDENT_CONTEXT)
 
     assert verdict.verdict == "DENY"
     assert "no content" in verdict.reason
@@ -184,7 +195,7 @@ def test_llm_policy_check_fn_passes_model_and_temperature_through(
     monkeypatch.setattr("guarded_agent.guardrails.policy_checker.litellm.completion", _capture)
     check_fn = make_llm_policy_check_fn("claude-haiku-4-5-20251001", temperature=0.0)
 
-    check_fn(ACTION, CONFIDENT_CONTEXT)
+    check_fn(CONVERSATION, ACTION, CONFIDENT_CONTEXT)
 
     assert captured["model"] == "claude-haiku-4-5-20251001"
     assert captured["temperature"] == 0.0

@@ -396,7 +396,7 @@ def make_policy_gate_node(
 
         query = _build_retrieval_query(action)
         context = get_policy_context(retriever, query, full_policy_text, top_k, min_confidence)
-        verdict = check_policy(action, context, policy_check_fn)
+        verdict = check_policy(state.conversation[:-1], action, context, policy_check_fn)
 
         if verdict.verdict == "DENY":
             updated = _reject_proposal(state, f"I can't do that: {verdict.reason}")

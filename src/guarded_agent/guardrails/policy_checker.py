@@ -8,19 +8,27 @@ import litellm
 from pydantic import ValidationError
 
 from guarded_agent.guardrails.policy_retrieval import PolicyContext
-from guarded_agent.state import PolicyVerdict, ProposedAction
+from guarded_agent.state import Message, PolicyVerdict, ProposedAction
 
 POLICY_CHECK_SYSTEM_PROMPT = """
 You are a policy compliance checker for a customer service agent. You will be given
-a proposed tool call and the relevant policy clauses. Decide whether the action
-should be ALLOWED, DENIED, or requires the user's explicit confirmation first.
+the conversation so far, a proposed tool call, and the relevant policy clauses. Decide
+whether the action should be ALLOWED, DENIED, or requires the user's explicit
+confirmation first.
+
+Use the conversation so far to check whether any prerequisite the policy clauses
+mention (e.g. user authentication) was already satisfied earlier in this same
+conversation -- for example, an earlier successful call that establishes identity
+means an authentication clause is already satisfied for later actions in the same
+session, not a reason to deny them again.
 
 Rules:
-- ALLOW: the action is clearly permitted by the policy clauses given, and no further
-  confirmation is required by those clauses.
+- ALLOW: the action is clearly permitted by the policy clauses given (accounting for
+  what has already happened in the conversation), and no further confirmation is
+  required by those clauses.
 - DENY: the action violates the policy clauses given, or is not covered by them.
 - NEEDS_CONFIRMATION: the action would be permitted, but the policy requires explicit
-  user confirmation before it proceeds, and nothing in the proposed call indicates
+  user confirmation before it proceeds, and nothing in the conversation indicates
   that confirmation was already obtained.
 
 You must cite the id of exactly one policy clause that most directly supports your
@@ -44,8 +52,28 @@ def _format_clauses(context: PolicyContext) -> str:
     return "\n\n".join(f"[{clause.clause_id}] {clause.text}" for clause in context.clauses)
 
 
-def _build_user_prompt(action: ProposedAction, context: PolicyContext) -> str:
+def _format_history(conversation: list[Message]) -> str:
+    """Same small formatting helper as guardrails/critic.py's -- kept as a
+    separate copy rather than a shared import so each guardrail module stays
+    independently readable; the logic is a few lines, not worth a
+    cross-module dependency for."""
+    lines = []
+    for message in conversation:
+        if message.role == "user":
+            lines.append(f"user: {message.content}")
+        elif message.role == "tool":
+            lines.append(f"tool result: {message.content}")
+        elif message.content:
+            lines.append(f"assistant: {message.content}")
+    return "\n".join(lines)
+
+
+def _build_user_prompt(
+    conversation: list[Message], action: ProposedAction, context: PolicyContext
+) -> str:
     return (
+        "Conversation so far:\n"
+        f"{_format_history(conversation)}\n\n"
         "Proposed tool call:\n"
         f"name: {action.tool_name}\n"
         f"arguments: {json.dumps(action.arguments)}\n\n"
@@ -81,11 +109,19 @@ def _fail_closed(reason: str) -> PolicyVerdict:
     return PolicyVerdict(verdict="DENY", clause_id="", reason=reason)
 
 
-PolicyCheckFn = Callable[[ProposedAction, PolicyContext], PolicyVerdict]
-"""(proposed action, retrieved policy context) -> PolicyVerdict.
+PolicyCheckFn = Callable[[list[Message], ProposedAction, PolicyContext], PolicyVerdict]
+"""(conversation so far, proposed action, retrieved policy context) -> PolicyVerdict.
 
 Injectable so tests can supply a fixed stub or a fixture-recorded response
 instead of a real LLM call, matching graph.py's GenerateFn pattern.
+
+Takes the conversation for the same reason guardrails/critic.py's
+CriticCheckFn does (and always has): a policy clause like "authenticate the
+user first" is only checkable against what's already happened in *this*
+session -- verified live (PLAN.md commit 21 v2 smoke run) that without it,
+the checker has no way to know authentication already succeeded earlier in
+the same conversation and denies every subsequent action that clause
+covers, over and over, for the rest of the session.
 """
 
 
@@ -99,12 +135,14 @@ def make_llm_policy_check_fn(model: str, temperature: float = 0.0) -> PolicyChec
     module independent of tau2, consistent with the rest of guardrails/.
     """
 
-    def _check(action: ProposedAction, context: PolicyContext) -> PolicyVerdict:
+    def _check(
+        conversation: list[Message], action: ProposedAction, context: PolicyContext
+    ) -> PolicyVerdict:
         response = litellm.completion(
             model=model,
             messages=[
                 {"role": "system", "content": POLICY_CHECK_SYSTEM_PROMPT},
-                {"role": "user", "content": _build_user_prompt(action, context)},
+                {"role": "user", "content": _build_user_prompt(conversation, action, context)},
             ],
             temperature=temperature,
         )
@@ -122,9 +160,12 @@ def make_llm_policy_check_fn(model: str, temperature: float = 0.0) -> PolicyChec
 
 
 def check_policy(
-    action: ProposedAction, context: PolicyContext, check_fn: PolicyCheckFn
+    conversation: list[Message],
+    action: ProposedAction,
+    context: PolicyContext,
+    check_fn: PolicyCheckFn,
 ) -> PolicyVerdict:
     """Thin entry point so callers don't need to know check_fn exists as a
     concept -- mirrors ToolRegistry.dispatch's shape (validated inputs in,
     structured result out)."""
-    return check_fn(action, context)
+    return check_fn(conversation, action, context)

@@ -345,13 +345,17 @@ _A_CLAUSE = RetrievedClause(clause_id="c1", text="Some clause text.", score=0.9)
 def _stub_policy_check(
     verdict: str, clause_id: str = "c1", reason: str = "because policy"
 ) -> PolicyCheckFn:
-    def _check(action: ProposedAction, context: PolicyContext) -> PolicyVerdict:
+    def _check(
+        conversation: list[Message], action: ProposedAction, context: PolicyContext
+    ) -> PolicyVerdict:
         return PolicyVerdict(verdict=verdict, clause_id=clause_id, reason=reason)  # type: ignore[arg-type]
 
     return _check
 
 
-def _never_check_policy(action: ProposedAction, context: PolicyContext) -> PolicyVerdict:
+def _never_check_policy(
+    conversation: list[Message], action: ProposedAction, context: PolicyContext
+) -> PolicyVerdict:
     raise AssertionError("policy_check_fn should never be called")
 
 
