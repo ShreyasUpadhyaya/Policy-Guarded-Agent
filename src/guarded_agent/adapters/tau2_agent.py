@@ -247,11 +247,20 @@ class GuardedTau2Agent(LLMConfigMixin, HalfDuplexAgent[AgentState]):  # type: ig
 
         state = run_graph(self.app, state)
 
-        # The kill switch (budget breach) produces a message without calling the
-        # LLM this turn -- attaching self._last_generation's cost/usage there
-        # would misattribute a *previous* turn's figures to a free message.
+        # Escalation (budget breach, repeated tool failure, policy deadlock, or a
+        # second critic rejection) produces a message without calling the LLM this
+        # turn -- attaching self._last_generation's cost/usage there would
+        # misattribute a *previous* turn's figures to a free message. The cost is
+        # zero, not unknown, so it must be 0.0/empty usage, never None: tau2's own
+        # get_cost() treats *any* message with cost=None as poisoning the whole
+        # conversation's agent_cost to None (verified live, PLAN.md commit 21 v2
+        # smoke run -- every escalated task's agent_cost/user_cost came back None,
+        # which then fails analysis.trace_loader.load_traces's non-optional
+        # Trace.agent_cost field outright).
+        cost: float | None
+        usage: dict[str, int] | None
         if state.escalated:
-            cost, usage = None, None
+            cost, usage = 0.0, {"prompt_tokens": 0, "completion_tokens": 0}
         else:
             cost = self._last_generation.cost
             usage = self._last_generation.usage
