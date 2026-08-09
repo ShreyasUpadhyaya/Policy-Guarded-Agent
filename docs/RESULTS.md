@@ -49,7 +49,13 @@ on revision, rejected tool-call proposals left dangling in conversation history 
 the *next* turn's LLM call outright), a policy checker with no visibility into the
 conversation (denying already-authenticated actions again), and escalated messages
 reporting cost as unknown rather than zero (breaking this project's own trace loader).
-See `PLAN.md`'s environment gotchas for detail and the commits fixing each.
+Each was shipped as its own `fix:` commit in the git history, in the order found.
+
+The ablation study referenced above as the way to properly isolate each guardrail's
+contribution hasn't been run at scale — this is a personal project on a personal
+budget. See [`EVALUATION.md`'s "Known Limitations & How to Extend"](EVALUATION.md#known-limitations--how-to-extend)
+for exactly what's built vs. run, and how to run the rest for close to $0 using a
+free-tier model.
 
 Sources: [`evals/results/baseline_smoke/results.json`](../evals/results/baseline_smoke/results.json),
 [`evals/results/v1_smoke/results.json`](../evals/results/v1_smoke/results.json),
