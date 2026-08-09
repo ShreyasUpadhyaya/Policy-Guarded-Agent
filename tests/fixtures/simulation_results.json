@@ -18,7 +18,21 @@
         "reward_breakdown": {
           "DB": 1.0,
           "NL_ASSERTION": 1.0
-        }
+        },
+        "action_checks": [
+          {
+            "action": {"action_id": "0_0", "requestor": "assistant", "name": "find_user_id_by_name_zip"},
+            "action_match": true,
+            "action_reward": 1.0,
+            "tool_type": "read"
+          },
+          {
+            "action": {"action_id": "0_1", "requestor": "assistant", "name": "issue_refund"},
+            "action_match": true,
+            "action_reward": 1.0,
+            "tool_type": "write"
+          }
+        ]
       },
       "messages": [
         {

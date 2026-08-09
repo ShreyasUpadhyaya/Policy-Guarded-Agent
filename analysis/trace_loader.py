@@ -30,6 +30,17 @@ class Step(BaseModel):
     usage: TokenUsage | None = None
 
 
+class ActionCheck(BaseModel):
+    """One evaluated tool call from reward_info.action_checks -- tau2's own
+    ground truth for whether an action matched the task's expected action
+    and whether it was a read or a write, independent of anything our own
+    registry/graph believed at the time."""
+
+    name: str
+    tool_type: str
+    action_match: bool
+
+
 class Trace(BaseModel):
     """A single tau2 simulation, normalized from a results.json entry."""
 
@@ -43,6 +54,7 @@ class Trace(BaseModel):
     reward: float
     reward_breakdown: dict[str, float]
     steps: list[Step]
+    action_checks: list[ActionCheck] = []
 
     @property
     def total_cost(self) -> float:
@@ -76,6 +88,12 @@ def _parse_step(raw: dict[str, Any]) -> Step:
     )
 
 
+def _parse_action_check(raw: dict[str, Any]) -> ActionCheck:
+    return ActionCheck(
+        name=raw["action"]["name"], tool_type=raw["tool_type"], action_match=raw["action_match"]
+    )
+
+
 def _parse_trace(raw: dict[str, Any], domain: str) -> Trace:
     reward_info = raw["reward_info"]
     return Trace(
@@ -89,6 +107,7 @@ def _parse_trace(raw: dict[str, Any], domain: str) -> Trace:
         reward=reward_info["reward"],
         reward_breakdown=reward_info.get("reward_breakdown", {}),
         steps=[_parse_step(m) for m in raw["messages"]],
+        action_checks=[_parse_action_check(a) for a in reward_info.get("action_checks") or []],
     )
 
 

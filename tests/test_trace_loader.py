@@ -67,3 +67,20 @@ def test_total_tokens_sums_usage_across_steps() -> None:
     traces = load_traces(FIXTURE_PATH)
     # sim-1: (400+12) + (5650+106) = 6168; the greeting and tool-result steps have no usage.
     assert traces[0].total_tokens == 6168
+
+
+def test_action_checks_parsed_with_tool_type() -> None:
+    traces = load_traces(FIXTURE_PATH)
+    checks = traces[0].action_checks
+
+    assert len(checks) == 2
+    assert checks[0].name == "find_user_id_by_name_zip"
+    assert checks[0].tool_type == "read"
+    assert checks[1].name == "issue_refund"
+    assert checks[1].tool_type == "write"
+    assert checks[1].action_match is True
+
+
+def test_action_checks_defaults_to_empty_list_when_absent() -> None:
+    traces = load_traces(FIXTURE_PATH)
+    assert traces[1].action_checks == []
