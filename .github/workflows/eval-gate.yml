@@ -1,0 +1,79 @@
+name: eval-regression-gate
+
+# Manual trigger ONLY -- deliberately not on push/pull_request.
+#
+# PLAN.md commit 31 originally called for this to run automatically on every
+# PR, failing the build if a tiny live eval's Pass^1 drops below a pinned
+# threshold. That's a real live LLM cost on every single push, which this
+# project's budget (see docs/EVALUATION.md's "Known Limitations & How to
+# Extend" -- both the Anthropic and OpenAI balances are down to a few
+# dollars combined, with no more coming) can't absorb as a *recurring*
+# expense, even though any one run is cheap. Scoped down to workflow_dispatch
+# so a real eval only runs when someone deliberately clicks "Run workflow"
+# and has funded the ANTHROPIC_API_KEY/OPENAI_API_KEY repo secrets this
+# depends on -- neither is configured by default.
+#
+# To use this for real: add ANTHROPIC_API_KEY and OPENAI_API_KEY as repository
+# secrets (Settings -> Secrets and variables -> Actions), then run this
+# workflow manually. PASS1_THRESHOLD below is a placeholder -- CLAUDE.md rule
+# 6 (never invent numbers) means it shouldn't be treated as calibrated until
+# it's checked against a real committed run's Pass^1.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pass1_threshold:
+        description: "Minimum acceptable Pass^1 (0.0-1.0) -- placeholder, not yet calibrated against a real run"
+        required: false
+        default: "0.5"
+
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies + vendored tau2-bench
+        run: |
+          uv sync --group dev
+          test -d vendor/tau2-bench || git clone --depth 1 --branch v1.0.1 https://github.com/sierra-research/tau2-bench vendor/tau2-bench
+
+      - name: Run 3-task smoke eval
+        env:
+          TAU2_DATA_DIR: vendor/tau2-bench/data
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PYTHONUTF8: "1"
+        run: |
+          uv run tau2 check-data
+          uv run python scripts/run_tau2_guarded.py run --domain retail --agent guarded_agent \
+            --agent-llm anthropic/claude-haiku-4-5-20251001 \
+            --user-llm anthropic/claude-haiku-4-5-20251001 \
+            --num-trials 1 --num-tasks 3 --save-to ci_gate
+
+      - name: Check Pass^1 against threshold
+        env:
+          THRESHOLD: ${{ github.event.inputs.pass1_threshold }}
+        run: |
+          uv run python -c "
+          import json, os, sys
+          from pathlib import Path
+          from analysis.trace_loader import load_traces
+
+          threshold = float(os.environ['THRESHOLD'])
+          path = Path('vendor/tau2-bench/data/simulations/ci_gate/results.json')
+          traces = load_traces(path)
+          if not traces:
+              print('No traces produced -- treating as a failure.')
+              sys.exit(1)
+          pass1 = sum(1 for t in traces if t.reward == 1.0) / len(traces)
+          print(f'Pass^1: {pass1:.3f} (threshold: {threshold:.3f}, n={len(traces)})')
+          if pass1 < threshold:
+              print('FAIL: Pass^1 below threshold.')
+              sys.exit(1)
+          "
