@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.metrics.agent_metrics import is_successful, pass_hat_k
 from tau2.runner.batch import run_domain
+from tau2.utils.utils import DATA_DIR
 
 from guarded_agent.adapters import tau2_agent  # noqa: F401  (registers guarded_agent on import)
 
@@ -40,6 +41,7 @@ class VariantResult(BaseModel):
     infra_error_count: int
     pass_hat_k: dict[int, float]
     avg_cost: float
+    avg_judge_cost: float
 
 
 def load_variants(path: Path) -> list[VariantConfig]:
@@ -62,6 +64,7 @@ def _to_tau2_config(variant: VariantConfig) -> TextRunConfig:
         save_to=variant.name,
         seed=variant.seed,
         auto_resume=True,
+        verbose_logs=True,
     )
 
 
@@ -105,12 +108,45 @@ def outcomes_by_task(simulations: list[SimulationRun]) -> dict[str, list[bool]]:
     return grouped
 
 
-def summarize(name: str, simulations: list[SimulationRun]) -> VariantResult:
+def judge_cost_for_simulation(save_dir: Path, sim: SimulationRun) -> float:
+    """Cost of the gpt-4.1 NL-assertion judge call graded against this
+    simulation, read from tau2's verbose LLM debug log.
+
+    tau2's `Simulation.agent_cost`/`user_cost` cover the agent/user
+    conversation only -- the judge call that grades the finished trajectory
+    (`tau2.evaluator.evaluator_nl_assertions.NLAssertionsEvaluator`, hardcoded
+    to `gpt-4.1-2025-04-14`) computes its own cost internally but never
+    attaches it to the Simulation object, so it's otherwise invisible to any
+    committed results file. Requires `TextRunConfig(verbose_logs=True)`
+    (set in `_to_tau2_config`), which writes one
+    `<timestamp>_nl_assertions_eval_<id>.json` log per simulation with a
+    `response.cost` field. Returns 0.0 for tasks with no NL assertions (e.g.
+    the mock domain) or simulations that never reached grading -- both leave
+    no log file, not an error.
+    """
+    log_dir = save_dir / "artifacts" / f"task_{sim.task_id}" / f"sim_{sim.id}" / "llm_debug"
+    if not log_dir.is_dir():
+        return 0.0
+    total = 0.0
+    for log_file in log_dir.glob("*_nl_assertions_eval_*.json"):
+        data = json.loads(log_file.read_text(encoding="utf-8"))
+        total += data.get("response", {}).get("cost") or 0.0
+    return total
+
+
+def summarize(
+    name: str, simulations: list[SimulationRun], save_dir: Path | None = None
+) -> VariantResult:
     grouped = outcomes_by_task(simulations)
     infra_errors = len(simulations) - sum(len(v) for v in grouped.values())
-    costs = [
-        sim.agent_cost + (sim.user_cost or 0.0) for sim in simulations if sim.agent_cost is not None
-    ]
+    # Same population for both averages -- a simulation with no cost data
+    # (agent_cost is None, e.g. an infra error) never reached grading either,
+    # so it must be excluded from both denominators, not just avg_cost's.
+    costed_simulations = [sim for sim in simulations if sim.agent_cost is not None]
+    costs = [sim.agent_cost + (sim.user_cost or 0.0) for sim in costed_simulations]
+    judge_costs = (
+        [judge_cost_for_simulation(save_dir, sim) for sim in costed_simulations] if save_dir else []
+    )
     return VariantResult(
         name=name,
         total_simulations=len(simulations),
@@ -118,13 +154,15 @@ def summarize(name: str, simulations: list[SimulationRun]) -> VariantResult:
         infra_error_count=infra_errors,
         pass_hat_k=pass_hat_k_table(grouped),
         avg_cost=sum(costs) / len(costs) if costs else 0.0,
+        avg_judge_cost=sum(judge_costs) / len(judge_costs) if judge_costs else 0.0,
     )
 
 
 def run_variant(variant: VariantConfig) -> VariantResult:
     config = _to_tau2_config(variant)
     results = run_domain(config)
-    return summarize(variant.name, results.simulations)
+    save_dir = DATA_DIR / "simulations" / variant.name
+    return summarize(variant.name, results.simulations, save_dir=save_dir)
 
 
 def main() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from tau2.metrics.agent_metrics import pass_hat_k
 
 from evals.run_suite import (
     VariantConfig,
+    judge_cost_for_simulation,
     load_variants,
     outcomes_by_task,
     pass_hat_k_table,
@@ -121,6 +123,81 @@ def test_summarize_reports_infra_error_count_and_avg_cost() -> None:
     assert result.total_tasks == 1
     assert result.infra_error_count == 1
     assert result.avg_cost == pytest.approx(0.02 + 0.005)
+
+
+def test_summarize_without_save_dir_reports_zero_judge_cost() -> None:
+    """No save_dir means no llm_debug logs to read -- must not crash, and
+    must report the gap as 0.0 rather than a misleadingly absent field."""
+    result = summarize("baseline", [_sim("t1", reward=1.0)])
+
+    assert result.avg_judge_cost == 0.0
+
+
+# --- judge_cost_for_simulation: PLAN.md's "avg_cost misses the gpt-4.1 judge
+# call" gap, found while calibrating a real Haiku run (see PLAN.md commit 24
+# notes) -- fixture-based per CLAUDE.md's "record a response once, replay it"
+# convention, no live LLM call required. ---------------------------------------
+
+
+def _write_judge_log(save_dir: Path, task_id: str, sim_id: str, cost: float) -> None:
+    log_dir = save_dir / "artifacts" / f"task_{task_id}" / f"sim_{sim_id}" / "llm_debug"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "20260819_120000_000_nl_assertions_eval_abcd1234.json"
+    log_file.write_text(
+        json.dumps(
+            {
+                "call_id": "abcd1234",
+                "call_name": "nl_assertions_eval",
+                "response": {"content": "{}", "cost": cost},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_judge_cost_for_simulation_reads_the_verbose_debug_log(tmp_path: Path) -> None:
+    _write_judge_log(tmp_path, task_id="t1", sim_id="t1-sim", cost=0.0031)
+
+    cost = judge_cost_for_simulation(tmp_path, _sim("t1", reward=1.0))
+
+    assert cost == pytest.approx(0.0031)
+
+
+def test_judge_cost_for_simulation_is_zero_when_no_log_exists(tmp_path: Path) -> None:
+    """No nl_assertions criteria (e.g. mock domain) or a simulation that
+    never reached grading both leave no llm_debug dir -- that's a real 0.0,
+    not an error."""
+    cost = judge_cost_for_simulation(tmp_path, _sim("t1", reward=1.0))
+
+    assert cost == 0.0
+
+
+def test_summarize_averages_judge_cost_across_simulations(tmp_path: Path) -> None:
+    _write_judge_log(tmp_path, task_id="t1", sim_id="t1-sim", cost=0.004)
+    # t2 has no judge log (e.g. infra error before grading) -- contributes 0.0.
+    simulations = [_sim("t1", reward=1.0), _sim("t2", reward=1.0)]
+
+    result = summarize("baseline", simulations, save_dir=tmp_path)
+
+    assert result.avg_judge_cost == pytest.approx((0.004 + 0.0) / 2)
+
+
+def test_summarize_excludes_infra_errors_from_both_cost_averages(tmp_path: Path) -> None:
+    """avg_cost and avg_judge_cost must share the same denominator -- a
+    simulation with no cost data (agent_cost=None, e.g. an infra error) never
+    reached grading either, so counting it in avg_judge_cost's denominator
+    while avg_cost already excludes it would silently understate the true
+    per-graded-task judge cost."""
+    _write_judge_log(tmp_path, task_id="t1", sim_id="t1-sim", cost=0.006)
+    simulations = [
+        _sim("t1", reward=1.0, agent_cost=0.03),
+        _sim("t2", reward=None, agent_cost=None),  # infra error, no cost data at all
+    ]
+
+    result = summarize("baseline", simulations, save_dir=tmp_path)
+
+    assert result.avg_cost == pytest.approx(0.03 + 0.005)
+    assert result.avg_judge_cost == pytest.approx(0.006)  # not (0.006 + 0.0) / 2
 
 
 def test_run_variant_never_calls_run_domain_with_wrong_config(

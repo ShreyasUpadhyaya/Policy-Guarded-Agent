@@ -10,6 +10,7 @@ from guarded_agent.guardrails.critic import (
     _extract_json_object,
     _format_clauses,
     _format_history,
+    _response_cost,
     make_llm_critic_check_fn,
 )
 from guarded_agent.guardrails.policy_retrieval import PolicyContext, RetrievedClause
@@ -168,3 +169,74 @@ def test_llm_critic_check_fn_passes_model_and_temperature_through(
     assert captured["model"] == "claude-haiku-4-5-20251001"
     assert captured["temperature"] == 0.0
     assert captured["messages"][0]["role"] == "system"
+
+
+# --- on_cost: same real, separately-billed-and-otherwise-invisible-to-tau2
+# spend as guardrails/policy_checker.py's make_llm_policy_check_fn. --------
+
+
+def test_llm_critic_check_fn_calls_on_cost_with_real_cost_and_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _fake_completion_response('{"approved": true, "reason": "ok"}')
+    response.usage.prompt_tokens = 200
+    response.usage.completion_tokens = 15
+    monkeypatch.setattr(
+        "guarded_agent.guardrails.critic.litellm.completion", lambda **kwargs: response
+    )
+    monkeypatch.setattr(
+        "guarded_agent.guardrails.critic.litellm.completion_cost", lambda **kwargs: 0.0019
+    )
+    calls: list[tuple[float, dict[str, int] | None]] = []
+    check_fn = make_llm_critic_check_fn("fake-model", on_cost=lambda c, u: calls.append((c, u)))
+
+    check_fn(CONVERSATION, "draft", CONFIDENT_CONTEXT)
+
+    assert calls == [(0.0019, {"prompt_tokens": 200, "completion_tokens": 15})]
+
+
+def test_llm_critic_check_fn_calls_on_cost_even_when_response_fails_to_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _fake_completion_response("not valid json")
+    monkeypatch.setattr(
+        "guarded_agent.guardrails.critic.litellm.completion", lambda **kwargs: response
+    )
+    monkeypatch.setattr(
+        "guarded_agent.guardrails.critic.litellm.completion_cost", lambda **kwargs: 0.0007
+    )
+    calls: list[float] = []
+    check_fn = make_llm_critic_check_fn("fake-model", on_cost=lambda c, u: calls.append(c))
+
+    verdict = check_fn(CONVERSATION, "draft", CONFIDENT_CONTEXT)
+
+    assert verdict.approved is False
+    assert calls == [0.0007]
+
+
+def test_llm_critic_check_fn_without_on_cost_never_calls_completion_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _fake_completion_response('{"approved": true, "reason": "ok"}')
+    monkeypatch.setattr(
+        "guarded_agent.guardrails.critic.litellm.completion", lambda **kwargs: response
+    )
+
+    def _boom(**kwargs: Any) -> float:
+        raise AssertionError("completion_cost must not be called without on_cost")
+
+    monkeypatch.setattr("guarded_agent.guardrails.critic.litellm.completion_cost", _boom)
+    check_fn = make_llm_critic_check_fn("fake-model")
+
+    check_fn(CONVERSATION, "draft", CONFIDENT_CONTEXT)  # must not raise
+
+
+def test_response_cost_defaults_to_zero_when_completion_cost_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise(**kwargs: Any) -> float:
+        raise ValueError("no pricing data for this model")
+
+    monkeypatch.setattr("guarded_agent.guardrails.critic.litellm.completion_cost", _raise)
+
+    assert _response_cost(MagicMock()) == 0.0

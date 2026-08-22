@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
+from typing import Any
 
 import litellm
 from pydantic import ValidationError
@@ -100,6 +101,32 @@ def _extract_json_object(text: str) -> str:
     return match.group(0) if match else stripped
 
 
+def _response_cost(response: Any) -> float:
+    """Real cost of a litellm completion response, defensively -- litellm's
+    completion_cost() can raise for models it has no pricing data for, and a
+    guardrail's cost being unmeasurable must never block the verdict it
+    already computed. Matches tau2's own get_response_cost's same
+    try/except-return-0.0 shape (tau2/utils/llm_utils.py), reimplemented
+    rather than imported: this module stays independent of tau2 by design
+    (see make_llm_policy_check_fn's docstring), and litellm itself -- not
+    any tau2-authored logic -- is what's actually being reused here.
+    """
+    try:
+        return litellm.completion_cost(completion_response=response)
+    except Exception:
+        return 0.0
+
+
+def _response_usage(response: Any) -> dict[str, int] | None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    return {
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+    }
+
+
 def _fail_closed(reason: str) -> PolicyVerdict:
     """A policy check that couldn't produce a valid verdict fails to DENY,
     never to ALLOW -- fail-safe forcing, per CLAUDE.md: a degraded input must
@@ -125,7 +152,11 @@ covers, over and over, for the rest of the session.
 """
 
 
-def make_llm_policy_check_fn(model: str, temperature: float = 0.0) -> PolicyCheckFn:
+def make_llm_policy_check_fn(
+    model: str,
+    temperature: float = 0.0,
+    on_cost: Callable[[float, dict[str, int] | None], None] | None = None,
+) -> PolicyCheckFn:
     """Real policy checking via a direct litellm call.
 
     Deliberately not routed through tau2.utils.llm_utils.generate() like
@@ -133,6 +164,14 @@ def make_llm_policy_check_fn(model: str, temperature: float = 0.0) -> PolicyChec
     format at all (it's evaluating an already-proposed action, not
     proposing one), so keeping it on plain litellm keeps this guardrail
     module independent of tau2, consistent with the rest of guardrails/.
+
+    This call is real, separately-billed spend that tau2 has no way to see
+    on its own (it never goes through tau2's generate(), which is the only
+    place tau2 attaches cost to a message) -- on_cost is how a caller (see
+    adapters/tau2_agent.py's TurnCost) recovers it. Called unconditionally
+    right after the response comes back, even on the fail-closed paths below:
+    the call already happened and cost money regardless of whether the
+    response parsed into a usable verdict.
     """
 
     def _check(
@@ -146,6 +185,8 @@ def make_llm_policy_check_fn(model: str, temperature: float = 0.0) -> PolicyChec
             ],
             temperature=temperature,
         )
+        if on_cost is not None:
+            on_cost(_response_cost(response), _response_usage(response))
         content = response.choices[0].message.content
         if content is None:
             return _fail_closed("policy check LLM call returned no content")

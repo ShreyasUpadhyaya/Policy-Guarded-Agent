@@ -9,6 +9,7 @@ from guarded_agent.guardrails.policy_checker import (
     _build_user_prompt,
     _extract_json_object,
     _format_clauses,
+    _response_cost,
     make_llm_policy_check_fn,
 )
 from guarded_agent.guardrails.policy_retrieval import PolicyContext, RetrievedClause
@@ -200,3 +201,83 @@ def test_llm_policy_check_fn_passes_model_and_temperature_through(
     assert captured["model"] == "claude-haiku-4-5-20251001"
     assert captured["temperature"] == 0.0
     assert captured["messages"][0]["role"] == "system"
+
+
+# --- on_cost: this call is real, separately-billed spend invisible to tau2
+# (it never goes through tau2's generate()) -- verified live against a real
+# Haiku ablation run that this cost was being silently dropped entirely
+# (PLAN.md commit 24 calibration notes). ----------------------------------
+
+
+def test_llm_policy_check_fn_calls_on_cost_with_real_cost_and_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _fake_completion_response('{"verdict": "ALLOW", "clause_id": "x", "reason": "y"}')
+    response.usage.prompt_tokens = 120
+    response.usage.completion_tokens = 30
+    monkeypatch.setattr(
+        "guarded_agent.guardrails.policy_checker.litellm.completion", lambda **kwargs: response
+    )
+    monkeypatch.setattr(
+        "guarded_agent.guardrails.policy_checker.litellm.completion_cost",
+        lambda **kwargs: 0.0042,
+    )
+    calls: list[tuple[float, dict[str, int] | None]] = []
+    check_fn = make_llm_policy_check_fn("fake-model", on_cost=lambda c, u: calls.append((c, u)))
+
+    check_fn(CONVERSATION, ACTION, CONFIDENT_CONTEXT)
+
+    assert calls == [(0.0042, {"prompt_tokens": 120, "completion_tokens": 30})]
+
+
+def test_llm_policy_check_fn_calls_on_cost_even_when_response_fails_to_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The LLM call already happened and cost money regardless of whether
+    the response was usable -- a fail-closed DENY must not also silently
+    drop the cost of the call that produced it."""
+    response = _fake_completion_response("not valid json")
+    monkeypatch.setattr(
+        "guarded_agent.guardrails.policy_checker.litellm.completion", lambda **kwargs: response
+    )
+    monkeypatch.setattr(
+        "guarded_agent.guardrails.policy_checker.litellm.completion_cost", lambda **kwargs: 0.001
+    )
+    calls: list[float] = []
+    check_fn = make_llm_policy_check_fn("fake-model", on_cost=lambda c, u: calls.append(c))
+
+    verdict = check_fn(CONVERSATION, ACTION, CONFIDENT_CONTEXT)
+
+    assert verdict.verdict == "DENY"
+    assert calls == [0.001]
+
+
+def test_llm_policy_check_fn_without_on_cost_never_calls_completion_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_cost is optional -- when the caller doesn't ask for cost tracking,
+    completion_cost must not even be invoked, not just have its result
+    discarded (it can raise for models with no pricing data)."""
+    response = _fake_completion_response('{"verdict": "ALLOW", "clause_id": "x", "reason": "y"}')
+    monkeypatch.setattr(
+        "guarded_agent.guardrails.policy_checker.litellm.completion", lambda **kwargs: response
+    )
+
+    def _boom(**kwargs: Any) -> float:
+        raise AssertionError("completion_cost must not be called without on_cost")
+
+    monkeypatch.setattr("guarded_agent.guardrails.policy_checker.litellm.completion_cost", _boom)
+    check_fn = make_llm_policy_check_fn("fake-model")
+
+    check_fn(CONVERSATION, ACTION, CONFIDENT_CONTEXT)  # must not raise
+
+
+def test_response_cost_defaults_to_zero_when_completion_cost_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise(**kwargs: Any) -> float:
+        raise ValueError("no pricing data for this model")
+
+    monkeypatch.setattr("guarded_agent.guardrails.policy_checker.litellm.completion_cost", _raise)
+
+    assert _response_cost(MagicMock()) == 0.0

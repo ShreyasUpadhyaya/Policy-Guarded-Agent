@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
+from typing import Any
 
 import litellm
 from pydantic import BaseModel, ValidationError
@@ -44,6 +45,26 @@ def _extract_json_object(text: str) -> str:
         stripped = stripped.strip()
     match = _JSON_OBJECT_PATTERN.search(stripped)
     return match.group(0) if match else stripped
+
+
+def _response_cost(response: Any) -> float:
+    """Real cost of a litellm completion response -- same defensive shape
+    and same rationale for reimplementing rather than importing tau2's
+    get_response_cost as guardrails/policy_checker.py's copy."""
+    try:
+        return litellm.completion_cost(completion_response=response)
+    except Exception:
+        return 0.0
+
+
+def _response_usage(response: Any) -> dict[str, int] | None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    return {
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+    }
 
 
 def _fail_closed(reason: str) -> CriticVerdict:
@@ -93,12 +114,24 @@ matching graph.py's GenerateFn and policy_checker.py's PolicyCheckFn.
 """
 
 
-def make_llm_critic_check_fn(model: str, temperature: float = 0.0) -> CriticCheckFn:
+def make_llm_critic_check_fn(
+    model: str,
+    temperature: float = 0.0,
+    on_cost: Callable[[float, dict[str, int] | None], None] | None = None,
+) -> CriticCheckFn:
     """Real critic checking via a direct litellm call, independent of tau2
     for the same reason as guardrails/policy_checker.py's
     make_llm_policy_check_fn: this evaluates an already-drafted response
     rather than proposing a tool call, so it needs none of tau2's
-    tool-calling message format."""
+    tool-calling message format.
+
+    Same on_cost contract as make_llm_policy_check_fn: this call is real,
+    separately-billed spend invisible to tau2 (it never goes through tau2's
+    generate()), so on_cost is how a caller recovers it -- called
+    unconditionally right after the response comes back, even on the
+    fail-closed paths below, since the call already cost money regardless of
+    whether it parsed into a usable verdict.
+    """
 
     def _check(conversation: list[Message], draft: str, context: PolicyContext) -> CriticVerdict:
         response = litellm.completion(
@@ -109,6 +142,8 @@ def make_llm_critic_check_fn(model: str, temperature: float = 0.0) -> CriticChec
             ],
             temperature=temperature,
         )
+        if on_cost is not None:
+            on_cost(_response_cost(response), _response_usage(response))
         content = response.choices[0].message.content
         if content is None:
             return _fail_closed("critic LLM call returned no content")

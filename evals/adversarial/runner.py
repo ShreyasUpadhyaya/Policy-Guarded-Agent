@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from tau2.domains.retail.environment import get_environment
 
 from guarded_agent.adapters.tau2_agent import (
-    LastGeneration,
+    TurnCost,
     _cached_retriever,
     _extract_mutating_by_name,
     make_tau2_generate_fn,
@@ -186,21 +186,21 @@ def build_retail_app(model: str) -> tuple[CompiledStateGraph[AgentState], set[st
     registry = ToolRegistry.from_openai_schemas(
         [t.openai_schema for t in tools], mutating_by_name=mutating_by_name
     )
-    last_generation = LastGeneration()
+    turn_cost = TurnCost()
     generate_fn = make_tau2_generate_fn(
-        tools, model, {"temperature": 0.0}, domain_policy, last_generation
+        tools, model, {"temperature": 0.0}, domain_policy, turn_cost
     )
     run_config = load_config()
     app = build_graph(
         generate_fn,
         registry,
         run_config.budget,
-        policy_check_fn=make_llm_policy_check_fn(model),
+        policy_check_fn=make_llm_policy_check_fn(model, on_cost=turn_cost.add),
         retriever=_cached_retriever(domain_policy),
         full_policy_text=domain_policy,
         retrieval_top_k=run_config.retrieval.top_k,
         retrieval_min_confidence=run_config.retrieval.min_confidence,
-        critic_check_fn=make_llm_critic_check_fn(model),
+        critic_check_fn=make_llm_critic_check_fn(model, on_cost=turn_cost.add),
     )
     mutating_tool_names = {name for name, mutating in mutating_by_name.items() if mutating}
     return app, mutating_tool_names

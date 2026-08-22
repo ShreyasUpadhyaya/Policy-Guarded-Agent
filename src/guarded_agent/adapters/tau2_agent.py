@@ -132,17 +132,38 @@ def _extract_mutating_by_name(tools: list[Tau2Tool]) -> dict[str, bool]:
     return {tool.name: getattr(tool._func, "__mutates_state__", True) for tool in tools}
 
 
-class LastGeneration:
-    """Mutable side-channel holding the most recent tau2 generate() call's
-    cost/usage, so generate_next_message can attach real figures to the
-    outgoing AssistantMessage -- tau2's own trace and cost aggregation reads
-    .cost/.usage off the message itself, which our simplified AgentDecision
-    (deliberately tau2-independent) doesn't carry all the way through.
+class TurnCost:
+    """Mutable, per-turn cost/usage accumulator shared by every real LLM
+    call made while producing one outgoing message: the main agent
+    generation, plus any policy_checker/critic calls the graph triggers for
+    the same turn (including a critic-rejected first draft, which calls
+    generate_fn a second time via agent_revise). A single turn can involve
+    several real, separately-billed LLM calls; tau2's own cost aggregation
+    (get_cost()) sums each *message's* cost across the conversation, so this
+    must hold the sum of everything spent this turn, not just the last call
+    -- and must be reset at the start of every turn (generate_next_message)
+    or costs would compound across turns instead of resetting to what this
+    turn alone spent.
+
+    tau2's own trace/cost aggregation reads .cost/.usage off the outgoing
+    AssistantMessage, which our simplified AgentDecision (deliberately
+    tau2-independent) doesn't carry all the way through -- this is the side
+    channel that closes that gap.
     """
 
     def __init__(self) -> None:
-        self.cost: float | None = None
-        self.usage: dict[str, int] | None = None
+        self.cost: float = 0.0
+        self.usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
+
+    def add(self, cost: float | None, usage: dict[str, int] | None) -> None:
+        self.cost += cost or 0.0
+        if usage:
+            self.usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            self.usage["completion_tokens"] += usage.get("completion_tokens", 0)
+
+    def reset(self) -> None:
+        self.cost = 0.0
+        self.usage = {"prompt_tokens": 0, "completion_tokens": 0}
 
 
 def make_tau2_generate_fn(
@@ -150,7 +171,7 @@ def make_tau2_generate_fn(
     model: str,
     llm_args: dict[str, Any],
     domain_policy: str,
-    last_generation: LastGeneration,
+    turn_cost: TurnCost,
 ) -> GenerateFn:
     """Real LLM generation, reusing tau2's own generate() helper.
 
@@ -173,8 +194,7 @@ def make_tau2_generate_fn(
             call_name="guarded_agent_response",
             **llm_args,
         )
-        last_generation.cost = response.cost
-        last_generation.usage = response.usage
+        turn_cost.add(response.cost, response.usage)
         usage = response.usage or {}
         prompt_tokens = usage.get("prompt_tokens", 0)
         completion_tokens = usage.get("completion_tokens", 0)
@@ -217,16 +237,16 @@ class GuardedTau2Agent(LLMConfigMixin, HalfDuplexAgent[AgentState]):  # type: ig
             [t.openai_schema for t in tools],
             mutating_by_name=_extract_mutating_by_name(tools),
         )
-        self._last_generation = LastGeneration()
+        self._turn_cost = TurnCost()
         generate_fn = make_tau2_generate_fn(
-            tools, llm, self.llm_args, domain_policy, self._last_generation
+            tools, llm, self.llm_args, domain_policy, self._turn_cost
         )
         run_config = load_config()
 
         graph_kwargs: dict[str, Any] = {}
         if "registry" in enabled_guardrails:
             graph_kwargs["policy_check_fn"] = (
-                make_llm_policy_check_fn(llm)
+                make_llm_policy_check_fn(llm, on_cost=self._turn_cost.add)
                 if "policy_checker" in enabled_guardrails
                 else _always_allow_policy_check
             )
@@ -235,7 +255,9 @@ class GuardedTau2Agent(LLMConfigMixin, HalfDuplexAgent[AgentState]):  # type: ig
             graph_kwargs["retrieval_top_k"] = run_config.retrieval.top_k
             graph_kwargs["retrieval_min_confidence"] = run_config.retrieval.min_confidence
             if "critic" in enabled_guardrails:
-                graph_kwargs["critic_check_fn"] = make_llm_critic_check_fn(llm)
+                graph_kwargs["critic_check_fn"] = make_llm_critic_check_fn(
+                    llm, on_cost=self._turn_cost.add
+                )
 
         self.app = build_graph(
             generate_fn,
@@ -265,25 +287,28 @@ class GuardedTau2Agent(LLMConfigMixin, HalfDuplexAgent[AgentState]):  # type: ig
         elapsed = time.time() - self._started_at
         state = state.model_copy(update={"budget": state.budget.with_elapsed(elapsed)})
 
+        # Reset before running the graph, not after: this turn's accumulator
+        # must start empty regardless of how the *previous* turn ended, and
+        # must capture every real LLM call the graph makes below (agent,
+        # policy_checker, critic, and agent_revise's second agent call on a
+        # critic rejection all land in the same TurnCost instance). Without
+        # this reset, an escalation reached without calling the LLM this turn
+        # (e.g. a budget breach caught by entry_router before "agent" even
+        # runs) would misattribute a *previous* turn's cost to a free message
+        # -- the bug an earlier version of this method avoided by forcing
+        # escalated turns to always report 0.0, which had its own cost: it
+        # also zeroed out turns that escalated *after* real spend this turn
+        # (e.g. a second critic rejection, which calls agent + critic +
+        # agent_revise + critic_final before giving up). Resetting per turn
+        # and always reporting the accumulator's real total fixes both:
+        # verified live (PLAN.md commit 21 v2 smoke run) that a None cost
+        # poisons tau2's get_cost() for the whole conversation, and
+        # TurnCost.cost is a plain float that starts at 0.0, so it can never
+        # be None.
+        self._turn_cost.reset()
         state = run_graph(self.app, state)
-
-        # Escalation (budget breach, repeated tool failure, policy deadlock, or a
-        # second critic rejection) produces a message without calling the LLM this
-        # turn -- attaching self._last_generation's cost/usage there would
-        # misattribute a *previous* turn's figures to a free message. The cost is
-        # zero, not unknown, so it must be 0.0/empty usage, never None: tau2's own
-        # get_cost() treats *any* message with cost=None as poisoning the whole
-        # conversation's agent_cost to None (verified live, PLAN.md commit 21 v2
-        # smoke run -- every escalated task's agent_cost/user_cost came back None,
-        # which then fails analysis.trace_loader.load_traces's non-optional
-        # Trace.agent_cost field outright).
-        cost: float | None
-        usage: dict[str, int] | None
-        if state.escalated:
-            cost, usage = 0.0, {"prompt_tokens": 0, "completion_tokens": 0}
-        else:
-            cost = self._last_generation.cost
-            usage = self._last_generation.usage
+        cost = self._turn_cost.cost
+        usage = self._turn_cost.usage
 
         if state.proposed_action is not None:
             action = state.proposed_action
