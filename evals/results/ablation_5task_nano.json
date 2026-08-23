@@ -1,0 +1,60 @@
+{
+  "timestamp": "2026-08-23T03:07:57.279222+00:00",
+  "variants": [
+    {
+      "name": "baseline",
+      "total_simulations": 5,
+      "total_tasks": 5,
+      "infra_error_count": 0,
+      "pass_hat_k": {
+        "1": 0.0
+      },
+      "avg_cost": 0.00331358,
+      "avg_judge_cost": 0.0039796
+    },
+    {
+      "name": "+registry",
+      "total_simulations": 5,
+      "total_tasks": 5,
+      "infra_error_count": 0,
+      "pass_hat_k": {
+        "1": 0.0
+      },
+      "avg_cost": 0.00302364,
+      "avg_judge_cost": 0.0035979999999999996
+    },
+    {
+      "name": "+policy_checker",
+      "total_simulations": 5,
+      "total_tasks": 3,
+      "infra_error_count": 2,
+      "pass_hat_k": {
+        "1": 0.0
+      },
+      "avg_cost": 0.0022372,
+      "avg_judge_cost": 0.0015413333333333331
+    },
+    {
+      "name": "+critic",
+      "total_simulations": 5,
+      "total_tasks": 5,
+      "infra_error_count": 0,
+      "pass_hat_k": {
+        "1": 0.0
+      },
+      "avg_cost": 0.0021812999999999997,
+      "avg_judge_cost": 0.0006052
+    },
+    {
+      "name": "full",
+      "total_simulations": 5,
+      "total_tasks": 5,
+      "infra_error_count": 0,
+      "pass_hat_k": {
+        "1": 0.0
+      },
+      "avg_cost": 0.00384078,
+      "avg_judge_cost": 0.0015144
+    }
+  ]
+}

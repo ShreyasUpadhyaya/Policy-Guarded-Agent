@@ -113,11 +113,94 @@ committed, both the actual raw run output — the reclassification above is docu
 here, not baked into the files). Real cost logged in
 [`evals/results/COSTS.md`](../evals/results/COSTS.md).
 
+## Ablation study
+
 The ablation study referenced above as the way to properly isolate each guardrail's
-contribution hasn't been run at scale — this is a personal project on a personal
-budget. See [`EVALUATION.md`'s "Known Limitations & How to Extend"](EVALUATION.md#known-limitations--how-to-extend)
-for exactly what's built vs. run, and how to run the rest for close to $0 using a
-free-tier model.
+contribution was originally scoped at 5 variants × 40 tasks × 4 trials (~800
+simulations, an estimated $40-120) — declined outright, along with a scaled-down
+$2-15 calibration option, once the combined Anthropic + OpenAI budget dropped to a
+few dollars with nothing more coming. What actually ran instead, and why, is worth
+documenting honestly rather than pretending the original plan happened.
+
+**The free-tier search (all documented live, none worked out):** before spending
+anything, six free/cheap providers were tried as a stand-in for the paid agent/user
+model, each ruled out for a distinct, real reason rather than a shared one —
+Groq's new-account signup was broken outright (auth succeeds, account never attaches
+to an organization); Cerebras returned `Payment required` on every real call despite
+"no card required" marketing; Google AI Studio's actual observed cap was 20
+requests/day on a fresh project, not the ~1,500/day generally advertised; Cohere's
+free trial itself was genuine (1,000 calls/month, no card) but litellm's Cohere v2
+adapter sends a tool-schema field Cohere's API rejects outright, failing before any
+conversation happens; Alibaba Cloud Model Studio was ruled out on a jurisdiction
+block (banned in India) before any technical evaluation was even possible; and
+`gpt4free` was considered and rejected on integration grounds (not a litellm
+provider, relies on browser-automation/scraped sessions for many backends, no
+tool-calling reliability guarantee).
+
+Two fully local models via Ollama got real, bounded debug runs against actual retail
+tasks rather than being dismissed on reputation: `llama3.1:latest` (8B) proposed
+tool calls inconsistently — in one run it called `transfer_to_human_agents` four
+turns in a row without ever sending retail policy's required follow-up line, so the
+conversation never terminated on its own; `qwen3:8b`, tried specifically because
+Qwen models are widely reported as strong at structured tool-calling, did worse: zero
+of the required tool calls were ever issued (the model narrated its intent in prose
+instead), and it once leaked a raw streaming JSON fragment as literal message
+content. `qwen2.5:7b`, a different (non-"thinking") Qwen lineage, failed differently
+and more seriously — it fabricated a completed customer return in its reply without
+ever calling a real tool, a genuine hallucination rather than a formatting miss. Free
+and fully local remains the right choice for structural checks (does the guardrail
+wiring fire at all — used for the adversarial suite below), just not for anything
+where a full multi-turn simulation loop needs many consecutive correct steps in a row.
+
+**What actually ran: two small, real, paid slices.** With no free option viable,
+the smallest useful real scope — 5 variants × 5 tasks × 1 trial (25 simulations),
+spending from the healthier OpenAI balance rather than the nearly-exhausted
+Anthropic one — was run twice:
+
+| Model | Cost | Pass^1 (baseline / +registry / +policy_checker / +critic / full) |
+|---|---|---|
+| `openai/gpt-4.1-nano` (cheapest verified real OpenAI model) | $0.1216 | 0.000 / 0.000 / 0.000 / 0.000 / 0.000 |
+| `openai/gpt-4.1-mini` (retry, ~4x pricier) | $0.5801 | **0.400** / 0.000 / 0.000 / 0.200 / 0.000 |
+
+The nano run isn't useful as ablation evidence, but it *is* a real finding: every
+single graded simulation failed the DB check regardless of guardrail stage (reward
+is DB × NL_ASSERTION, multiplicative, so this alone zeroes every variant). nano
+communicated correctly often enough — NL_ASSERTION passed on 2 of 5 tasks,
+consistently across all variants — but didn't reliably execute the required backend
+write actions. That's a model-capability ceiling, not a guardrail signal, so nano
+was retried with mini instead of trusted as-is.
+
+Two real bugs were found and fixed while producing the mini row, both from reading
+the actual failures rather than trusting the summary numbers: **avg_cost was
+silently missing two real cost components** — the gpt-4.1 NL-assertion judge call
+and the policy_checker/critic guardrail calls both computed real, billed cost
+internally that never made it into any tracked field (`fix: track NL-assertion judge
+and guardrail LLM costs in run_suite`) — and **the escalation node could loop
+forever**: once triggered, none of its three triggers ever un-trip within a
+simulation, so it kept proposing a fresh `transfer_to_human_agents` call every turn
+indefinitely, observed live at 202 messages deep in this exact run's `+critic`
+variant before the fix (`fix: bound the escalation node so it cannot loop forever`).
+The first attempt at the mini run also hit real OpenAI tokens-per-minute rate limits
+on 11 of 25 simulations (`litellm.RateLimitError`, infrastructure, not a bug) —
+resolved for free by re-running the identical config three more times: tau2's own
+`auto_resume` excludes infrastructure-error terminations from its "already done"
+set, so each retry only re-attempted the still-failed tasks until all 25 completed
+clean.
+
+**Read honestly, not confidently:** at n=5 per variant this is far too small to be
+statistically meaningful, and it is not the clean, monotonic "guardrails help" story
+the original 800-simulation design was meant to produce. baseline (no guardrails at
+all) has the *highest* Pass^1; full (every guardrail enabled) is back to 0.000. What
+it is: a real, directionally consistent data point that weakly supports something
+this project already flagged as an unconfirmed-but-plausible hypothesis (the critic
+and/or policy_checker may be strict enough to block or derail otherwise-completable
+tasks, not just catch genuine violations) rather than confident proof of it. Raw
+data: [`evals/results/ablation_5task_nano.json`](../evals/results/ablation_5task_nano.json),
+[`evals/results/ablation_5task_mini.json`](../evals/results/ablation_5task_mini.json),
+both committed exactly as produced. Cost ledger with full narrative in
+[`evals/results/COSTS.md`](../evals/results/COSTS.md). See
+[`EVALUATION.md`'s free-tier provider table](EVALUATION.md#how-to-run-the-full-versions-later)
+for the complete, live-verified findings behind each ruled-out provider above.
 
 Sources: [`evals/results/baseline_smoke/results.json`](../evals/results/baseline_smoke/results.json),
 [`evals/results/v1_smoke/results.json`](../evals/results/v1_smoke/results.json),

@@ -31,9 +31,16 @@ in the test harness itself along the way, then landed on exactly one genuine
 vulnerability: a fabricated prior-conversation-turn injected into a message got the
 agent to skip real authentication and look up a real customer's order data.
 
-**Ablation study** (isolating which specific guardrail moves the numbers above) is
-built and tested but not run at meaningful scale — see
-[What still breaks](#what-still-breaks).
+**Ablation study** (isolating which specific guardrail moves the numbers above), small
+but real — 5 variants × 5 tasks, run twice against increasingly capable OpenAI models
+after six free-tier providers (Groq, Cerebras, Gemini, Cohere, two local Qwen/Llama
+models) were each ruled out for a distinct, live-verified reason
+([`docs/RESULTS.md`](docs/RESULTS.md#ablation-study)). `gpt-4.1-nano` ($0.12) proved
+too weak to pass the DB check on any variant; `gpt-4.1-mini` ($0.58) completed
+cleanly and found baseline (no guardrails) outperforming every guardrail-enabled
+variant — a real, if small-sample (n=5), signal that the critic/policy_checker may be
+stricter than necessary. Not the original 40×4-task design — see
+[What still breaks](#what-still-breaks) for the honest scope and caveats.
 
 ## Quickstart
 
@@ -74,13 +81,16 @@ the exact code that computes it: [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
 Five real, open items — categorized honestly rather than smoothed over:
 
-1. **The ablation study hasn't run at meaningful scale.** `evals/ablations.yaml` and
-   `evals/run_suite.py` are built, tested, and verified structurally (each of the 5
-   variants compiles the exact graph nodes it should — confirmed via live introspection,
-   not just code review) — but isolating *which specific guardrail* drives the Pass^1
-   drop in the Results table above needs a real run this project's remaining budget
-   can't cover. ([`docs/EVALUATION.md`](docs/EVALUATION.md#known-limitations--how-to-extend)
-   has exact commands and free-tier options for whoever runs this next.)
+1. **The ablation study has run, but only small — n=5 tasks per variant, not the
+   original 40×4.** `evals/ablations.yaml` and `evals/run_suite.py` are built, tested,
+   and now also run for real: 5 variants × 5 tasks × 1 trial against `gpt-4.1-mini`
+   ($0.58, after `gpt-4.1-nano` at $0.12 proved too weak to pass the DB check on any
+   variant at all). The result is a real but not statistically meaningful data point —
+   baseline outperformed every guardrail-enabled variant, which is a genuine, if
+   small-sample, signal rather than proof. ([`docs/RESULTS.md`](docs/RESULTS.md#ablation-study)
+   has the full provider journey, both real result files, and exact honest caveats;
+   [`docs/EVALUATION.md`](docs/EVALUATION.md#known-limitations--how-to-extend) has
+   the command to run it at the original scale if budget opens up.)
 2. **Judge calibration is measured against 6 failed traces, not 40-60.** Cohen's kappa
    between hand labels and the LLM judge (`analysis/mast_labeler.py`) needs a larger
    sample than what's currently committed to mean much statistically — direct
@@ -92,16 +102,23 @@ Five real, open items — categorized honestly rather than smoothed over:
    attack itself is ever tested. Documented as inconclusive rather than silently counted
    as a pass — [`docs/RESULTS.md`](docs/RESULTS.md#adversarial-suite) has the detail.
 4. **Free-tier models can't currently substitute for a full evaluation run.** Verified
-   live, not assumed: a local Ollama model is fine for the adversarial suite's single
-   scripted actions, but fails tau2's multi-step transfer protocol (calls
-   `transfer_to_human_agents` repeatedly without ever sending the required follow-up
-   line), causing full multi-turn simulations to loop to the step cap without ever
-   being graded. Getting a real evaluation-quality result currently requires the
-   production model, at real (if usually small) cost.
-5. **The critic's strictness isn't independently calibrated.** One case in the v2 run
-   looks like the critic rejecting a redundant-but-harmless re-confirmation as if it
-   were a real error — plausible, not confirmed, and exactly the kind of question the
-   parked ablation study (#1) exists to answer with more than one anecdote.
+   live against six candidates, not assumed: Groq (broken signup), Cerebras (billing
+   wall despite "no card required"), Google AI Studio (a real 20 req/day cap, not the
+   ~1,500 advertised), Cohere (a litellm tool-schema incompatibility), and two local
+   Ollama models each failing differently — `llama3.1` loops on tau2's multi-step
+   transfer protocol without ever sending the required follow-up line, and `qwen3`/
+   `qwen2.5` (tried specifically for their tool-calling reputation) either never issue
+   a real tool call at all or fabricate a completed customer action that never
+   happened. Getting a real evaluation-quality result currently requires a paid model,
+   at real (if usually small) cost — full breakdown in
+   [`docs/EVALUATION.md`](docs/EVALUATION.md#how-to-run-the-full-versions-later).
+5. **The critic/policy_checker's strictness isn't independently calibrated — now with
+   a real, small data point, not just an anecdote.** The ablation run above (#1) found
+   baseline (no guardrails) passing more tasks than every guardrail-enabled variant,
+   including full. At n=5/variant that's not proof, but it's a genuine directional
+   signal consistent with the [Results table](docs/RESULTS.md)'s v2 case where the
+   critic rejected a redundant-but-harmless re-confirmation as if it were a real
+   error — now looking like a real pattern, not a one-off.
 
 ## τ²-bench submission
 
