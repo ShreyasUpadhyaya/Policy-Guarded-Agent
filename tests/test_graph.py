@@ -309,6 +309,35 @@ def test_escalation_proposes_transfer_tool_when_registry_has_it() -> None:
     assert last_message.tool_calls[0].name == "transfer_to_human_agents"
 
 
+def test_escalation_does_not_repeat_once_already_escalated() -> None:
+    """The real bug (verified live 2026-08-21: a gpt-4.1-nano ablation run's
+    +critic variant looped 202 messages deep on this exact case). The
+    policy-deadlock trigger never un-trips within a simulation
+    (consecutive_policy_denials is never reset), so entry_router routes
+    back to escalation on every subsequent turn -- feeding the escalated
+    state straight back into the graph reproduces that second turn without
+    needing to fake wall-clock time passing. A second transfer_to_human_agents
+    call here -- tau2 would call the agent right back after executing it --
+    is exactly what must not happen."""
+    app = build_graph(
+        _never_call, registry=_registry_with_transfer_tool(), max_consecutive_policy_denials=1
+    )
+    state = AgentState(
+        conversation=[Message(role="user", content="hi")],
+        consecutive_policy_denials=1,
+    )
+    once_escalated = run(app, state)
+
+    result = run(app, once_escalated)
+
+    assert result.escalated is True
+    assert result.proposed_action is None
+    last_message = result.conversation[-1]
+    assert last_message.role == "assistant"
+    assert last_message.tool_calls is None
+    assert last_message.content is not None
+
+
 def test_escalation_falls_back_to_text_when_transfer_tool_not_registered() -> None:
     # default registry (loaded from registry.yaml) has no transfer_to_human_agents tool
     app = build_graph(_never_call, max_consecutive_policy_denials=1)

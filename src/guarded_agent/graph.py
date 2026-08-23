@@ -176,9 +176,52 @@ def make_escalation_node(
     saying so; the proposal bypasses policy_gate/write_gate deliberately --
     routing an escalation caused by policy deadlock back through the policy
     gate risks another denial, defeating the point of escalating.
+
+    Escalating twice in the same conversation is a real, live bug this
+    guarded against only by accident before: none of the three triggers
+    ever un-trips within a simulation (wall-clock time only goes up,
+    consecutive-failure/denial counters are never reset once tripped), so
+    entry_router keeps routing back here on every subsequent turn. If this
+    node kept proposing a fresh transfer_to_human_agents call each time,
+    tau2 would call the agent right back after executing it (its normal
+    after-any-tool-call behavior), and the turn could never hand off to the
+    user-simulator -- the only thing that can end the conversation cleanly
+    -- producing an unbounded loop of identical escalation calls, stopped
+    only by tau2's own coarse global max_steps. Verified live 2026-08-21: a
+    real gpt-4.1-nano ablation run's `+critic` variant hit exactly this,
+    202 messages of the same repeated tool call. The `state.escalated`
+    check below is the bound: a second visit emits plain text with no tool
+    call, which does hand off to the user, breaking the loop.
     """
 
     def escalation(state: AgentState) -> dict[str, Any]:
+        if state.escalated:
+            updated = state.add_message(
+                Message(
+                    role="assistant",
+                    content=(
+                        "This request has already been handed off to a human agent -- "
+                        "there's nothing further I can do here."
+                    ),
+                )
+            )
+            return {
+                "conversation": updated.conversation,
+                "escalated": updated.escalated,
+                "escalation_reason": updated.escalation_reason,
+                # The incoming state can still carry the *previous* turn's
+                # transfer_to_human_agents proposal (tau2_agent.py clears it
+                # after consuming it in production, but this node must not
+                # depend on that external contract to stay self-consistent)
+                # -- leaving it set here would put a stale proposed_action
+                # back on a state whose latest message has no tool call at
+                # all, which is exactly the inconsistency the first version
+                # of this fix shipped with (caught by
+                # test_escalation_does_not_repeat_once_already_escalated).
+                "proposed_action": None,
+                "critic_feedback": None,
+            }
+
         budget_verdict = check_budget(state.budget, budget_limits)
         failure_verdict = check_repeated_tool_failure(
             state.conversation, max_consecutive_tool_failures
