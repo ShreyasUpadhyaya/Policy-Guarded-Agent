@@ -1,0 +1,50 @@
+# Full ablation study using OpenAI API
+# 40 tasks × 4 trials × 5 variants = 800 simulations
+# Using gpt-4.1-mini for agent and user simulator
+# Judge uses τ²-bench hardcoded gpt-4.1 (unavoidable)
+
+variants:
+  - name: baseline-openai
+    agent: guarded_agent_baseline
+    domain: retail
+    llm_agent: gpt-4.1-mini
+    llm_user: gpt-4.1-mini
+    num_tasks: 40
+    num_trials: 4
+    seed: 300
+
+  - name: "+registry-openai"
+    agent: guarded_agent_registry
+    domain: retail
+    llm_agent: gpt-4.1-mini
+    llm_user: gpt-4.1-mini
+    num_tasks: 40
+    num_trials: 4
+    seed: 300
+
+  - name: "+policy_checker-openai"
+    agent: guarded_agent_policy_checker
+    domain: retail
+    llm_agent: gpt-4.1-mini
+    llm_user: gpt-4.1-mini
+    num_tasks: 40
+    num_trials: 4
+    seed: 300
+
+  - name: "+critic-openai"
+    agent: guarded_agent_critic
+    domain: retail
+    llm_agent: gpt-4.1-mini
+    llm_user: gpt-4.1-mini
+    num_tasks: 40
+    num_trials: 4
+    seed: 300
+
+  - name: full-openai
+    agent: guarded_agent
+    domain: retail
+    llm_agent: gpt-4.1-mini
+    llm_user: gpt-4.1-mini
+    num_tasks: 40
+    num_trials: 4
+    seed: 300

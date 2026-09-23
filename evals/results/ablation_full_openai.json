@@ -1,0 +1,54 @@
+{
+  "timestamp": "2026-09-23T17:01:13.771445+00:00",
+  "variants": [
+    {
+      "name": "baseline-openai",
+      "total_simulations": 160,
+      "total_tasks": 40,
+      "infra_error_count": 26,
+      "pass_hat_k": {
+        "1": 0.37083333333333335
+      },
+      "avg_cost": 0.013753214925373134,
+      "avg_judge_cost": 0.002795955223880597
+    },
+    {
+      "name": "+registry-openai",
+      "total_simulations": 160,
+      "total_tasks": 15,
+      "infra_error_count": 145,
+      "pass_hat_k": {
+        "1": 0.3333333333333333
+      },
+      "avg_cost": 0.012183226666666666,
+      "avg_judge_cost": 0.0018810666666666668
+    },
+    {
+      "name": "+policy_checker-openai",
+      "total_simulations": 160,
+      "total_tasks": 0,
+      "infra_error_count": 160,
+      "pass_hat_k": {},
+      "avg_cost": 0.0,
+      "avg_judge_cost": 0.0
+    },
+    {
+      "name": "+critic-openai",
+      "total_simulations": 160,
+      "total_tasks": 0,
+      "infra_error_count": 160,
+      "pass_hat_k": {},
+      "avg_cost": 0.0,
+      "avg_judge_cost": 0.0
+    },
+    {
+      "name": "full-openai",
+      "total_simulations": 160,
+      "total_tasks": 0,
+      "infra_error_count": 160,
+      "pass_hat_k": {},
+      "avg_cost": 0.0,
+      "avg_judge_cost": 0.0
+    }
+  ]
+}
