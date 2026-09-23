@@ -1,0 +1,56 @@
+# Gemini API integration example: 5 variants × 5 tasks × 1 trial
+# This demonstrates how to use Google Gemini API as the agent/user LLM
+# while keeping the τ²-bench judge on OpenAI (hardcoded, unavoidable).
+#
+# Cost estimate: ~5 tasks × $0.008 (judge only) = $0.04 total
+# Agent/user cost on Gemini: free-tier or negligible
+#
+# NOTE: This is a configuration template showing Gemini integration.
+# It is NOT run by default in the CI pipeline; use it for local testing
+# or when explicitly evaluating Gemini vs other models.
+
+variants:
+  - name: baseline-gemini
+    agent: guarded_agent_baseline
+    domain: retail
+    llm_agent: gemini/gemini-3.0-flash
+    llm_user: gemini/gemini-3.0-flash
+    num_tasks: 5
+    num_trials: 1
+    seed: 300
+
+  - name: "+registry-gemini"
+    agent: guarded_agent_registry
+    domain: retail
+    llm_agent: gemini/gemini-3.0-flash
+    llm_user: gemini/gemini-3.0-flash
+    num_tasks: 5
+    num_trials: 1
+    seed: 300
+
+  - name: "+policy_checker-gemini"
+    agent: guarded_agent_policy_checker
+    domain: retail
+    llm_agent: gemini/gemini-3.0-flash
+    llm_user: gemini/gemini-3.0-flash
+    num_tasks: 5
+    num_trials: 1
+    seed: 300
+
+  - name: "+critic-gemini"
+    agent: guarded_agent_critic
+    domain: retail
+    llm_agent: gemini/gemini-3.0-flash
+    llm_user: gemini/gemini-3.0-flash
+    num_tasks: 5
+    num_trials: 1
+    seed: 300
+
+  - name: full-gemini
+    agent: guarded_agent
+    domain: retail
+    llm_agent: gemini/gemini-3.0-flash
+    llm_user: gemini/gemini-3.0-flash
+    num_tasks: 5
+    num_trials: 1
+    seed: 300
