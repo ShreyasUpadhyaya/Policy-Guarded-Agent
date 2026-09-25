@@ -202,6 +202,28 @@ both committed exactly as produced. Cost ledger with full narrative in
 [`EVALUATION.md`'s free-tier provider table](EVALUATION.md#how-to-run-the-full-versions-later)
 for the complete, live-verified findings behind each ruled-out provider above.
 
+**Attempted 40×4 run (2026-09-23): not a valid ablation.** The full-size config
+([`evals/ablations_openai.yaml`](../evals/ablations_openai.yaml), gpt-4.1-mini, 160
+simulations per variant) was launched against the remaining prepaid OpenAI credit
+and ran it out partway through. The failures are infrastructure errors, not agent
+behaviour. Each simulation's `termination_reason` and error text in tau2's per-variant
+`results.json` shows:
+
+| Variant | Completed | Infrastructure errors | Error |
+|---|---|---|---|
+| baseline | 134 | 26 | `RateLimitError`: tokens-per-minute limit |
+| +registry | 15 | 145 | `RateLimitError`: "You have no credits remaining" |
+| +policy_checker | 0 | 160 | same |
+| +critic | 0 | 160 | same |
+| full | 0 | 160 | same |
+
+Only baseline has enough completed simulations to mean anything: Pass^1 0.371 over
+its 134 completed runs. The other variants can't be compared with it, so this run
+says nothing about which guardrail helps or hurts. The committed summary,
+[`evals/results/ablation_full_openai.json`](../evals/results/ablation_full_openai.json),
+is kept exactly as produced. Its `avg_cost` fields exclude the errored simulations,
+and the run's total spend was not recorded.
+
 Sources: [`evals/results/baseline_smoke/results.json`](../evals/results/baseline_smoke/results.json),
 [`evals/results/v1_smoke/results.json`](../evals/results/v1_smoke/results.json),
 [`evals/results/v2_smoke/results.json`](../evals/results/v2_smoke/results.json)

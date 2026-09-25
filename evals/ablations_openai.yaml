@@ -1,7 +1,9 @@
-# Full ablation study using OpenAI API
-# 40 tasks × 4 trials × 5 variants = 800 simulations
-# Using gpt-4.1-mini for agent and user simulator
-# Judge uses τ²-bench hardcoded gpt-4.1 (unavoidable)
+# FULL tier: 5 variants x 40 tasks x 4 trials = 800 simulations, gpt-4.1-mini for
+# agent and user (the tau2 judge stays on hardcoded gpt-4.1). Ask before running.
+#
+# Run once on 2026-09-23 (evals/results/ablation_full_openai.json). The prepaid
+# OpenAI credit ran out partway through the run, so only baseline produced usable
+# data. See docs/RESULTS.md, "Attempted 40x4 run".
 
 variants:
   - name: baseline-openai
